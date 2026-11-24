@@ -110,8 +110,12 @@ class ConnectorPropertiesTest
                 .isEqualTo(Duration.ofSeconds(1));
 
         assertThatThrownBy(() -> new ConnectorProperties.Split("ccda", null,
-                Map.of(), null, 4, 0, null))
+                Map.of(), null, 4, 0, null, 64))
                 .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new ConnectorProperties.Split("ccda", null,
+                Map.of(), null, 4, 1, null, 0))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(more.split().registryBatch()).isEqualTo(64);
     }
 
     /**

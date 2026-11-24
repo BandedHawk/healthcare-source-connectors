@@ -143,12 +143,18 @@ public record ConnectorProperties(
      *                    once. Above 1 on Kafka only, whose topic needs a
      *                    partition per consumer of every pod
      * @param commit      how the records' files are committed
+     * @param registryBatch the most items whose registry statements of one
+     *                    kind (a lease, a checkpoint write, a read) a pod
+     *                    gathers into one statement, when they are asked
+     *                    for at the same time (STAGES.md §18.3, part B);
+     *                    1 runs each alone
      */
     public record Split(String format, String boundary,
             Map<String, String> options, @DefaultValue Limits limits,
             @DefaultValue("4") int concurrency,
             @DefaultValue("1") int consumers,
-            @DefaultValue SplitCommit commit)
+            @DefaultValue SplitCommit commit,
+            @DefaultValue("64") int registryBatch)
     {
 
         /**
@@ -161,6 +167,7 @@ public record ConnectorProperties(
          * @param concurrency items of one batch split at once
          * @param consumers   batches handled at once
          * @param commit      how files are committed
+         * @param registryBatch items' statements gathered into one
          * @throws IllegalArgumentException if a count is under 1
          */
         public Split
@@ -171,6 +178,11 @@ public record ConnectorProperties(
             {
                 throw new IllegalArgumentException("sdh.split.concurrency"
                         + " and sdh.split.consumers must be at least 1");
+            }
+            if (registryBatch < 1)
+            {
+                throw new IllegalArgumentException(
+                        "sdh.split.registry-batch must be at least 1");
             }
         }
 

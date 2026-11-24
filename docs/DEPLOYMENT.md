@@ -218,7 +218,8 @@ What is never deleted: anything stored (the records in silver and gold, with the
 landing ledger (`landed_items`: every item received, its digest and its links to items it is a copy of), failures
 and their events (open, declined or superseded), the audit journal, and the split stage's own registry, whose
 item rows its reconciler compares with the landing ledger at each start (a split item without one would be split
-again). Retention applies to the convert and transform stages only.
+again); the split stage also relies on never deleting an item's row to skip reading failures for an item
+it has just made (STAGES.md §18). Retention applies to the convert and transform stages only.
 
 **What the choice means:**
 - **Repeated messages.** A record's row is what makes a message delivered a second time a no-op. Once the row is

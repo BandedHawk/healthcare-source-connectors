@@ -3145,9 +3145,10 @@ Each part builds and passes its tests before the next:
    classes have `convert-stage`'s shape. Rejected: Google style, as harmonization's and mapping's Java, which
    matches the code it calls rather than the library it extends.
 
-## 18. Split's registry work for many items at once (proposed 2026-11-24, for review)
+## 18. Split's registry work for many items at once (proposed 2026-11-24; built 2026-11-24)
 
-Asked for by the user ("Yes, design it") after AWS runs K and L (PERFORMANCE.md §13.3). Not built.
+Asked for by the user ("Yes, design it") after AWS runs K and L (PERFORMANCE.md §13.3). Built as proposed, with
+§18.8's first two proposals taken ("Yes, build it"): see §18.9 for what differs, and DESIGN.md revision (fa).
 
 ### 18.1 Why
 
@@ -3219,7 +3220,7 @@ through a `RegistryBatcher` of its kind, as the Iceberg append already goes thro
 
 - A caller hands its row (item, epoch, values) to the batcher and waits. If no statement of that kind is running,
   it runs at once, with that row alone. Rows that arrive while one runs are gathered, and run together as the
-  next statement when it finishes, up to a limit (`sdh.split.registry.batch.max`, 64). **No linger:** at low load
+  next statement when it finishes, up to a limit (`sdh.split.registry-batch`, 64). **No linger:** at low load
   each item runs alone, as now, with no added wait; at load the batches grow by themselves, and only then.
 - The statement takes the rows as arrays (`unnest(?::uuid[], ?::bigint[], ...)`, as `StageRegistry` already
   does), **sorted by item**, so two pods' statements on overlapping lease rows take their locks in one order and
@@ -3283,7 +3284,7 @@ a cache, with its own sizing and expiry: a design of its own, after A and B are 
 
 1. Part A, behind no setting (it changes no behaviour), with its tests and the local statement counts.
 2. Part B's `RegistryBatcher`, first for the checkpoint writes (steps 6, 7, 9, 10, 16), then the lease and the
-   landed, copy and other reads; `sdh.split.registry.batch.max` (64; 1 turns gathering off).
+   landed, copy and other reads; `sdh.split.registry-batch` (64; 1 turns gathering off).
 3. Images with (ez), A and B; one AWS session: runs at pool 6 and 2.
 4. Then, if the numbers ask for it: the landed-summary reads (§18.3, last paragraph), or the shared append.
 
@@ -3296,3 +3297,31 @@ a cache, with its own sizing and expiry: a design of its own, after A and B are 
    the design (a split registry retention, if ever added, would then have to keep the rows of items with
    failures, as the record stages' does)?
 3. **The split pool's default:** 2 now. With Part B, 2 may be enough again; to be decided on the AWS numbers.
+
+### 18.9 As built (2026-11-24)
+
+Built as §18.3 proposes, with §18.8's answers: **no linger**; **"no path deletes a `split_item` row" kept as a
+rule of the design** (DEPLOYMENT.md lists the split registry among what is never deleted); the pool's default
+left at 2 until the AWS numbers. Where it differs, or stops short:
+
+- **The setting** is `sdh.split.registry-batch` (default 64; 1 turns gathering off, each statement then running
+  alone in its caller's thread); `SDH_SPLIT_REGISTRY_BATCH` in `apply.sh`. The design's draft name,
+  `sdh.split.registry.batch.max`, is not used.
+- **Part A** is `IngestPipeline.splitIfFresh`, tried by `ItemProcessor` before the full path. It opens the source
+  for its size first; if that fails, the size is over the limit, or the insert finds a row, the item takes §8's
+  path as before, reading its row. The completion number goes in with the `ARCHIVING` write, and `announced_at`
+  with `COMPLETED` (`GREATEST(announced_at, ended_at)`), and only for a stage with a fail store, as now.
+- **Part B** is `RegistryBatcher`, used by `ItemCheckpoints` (starts, saves, prepares, loads, landings, copies)
+  and `JdbcLeaseStore` (acquires, renewals, releases). Lease acquires are gathered across the items in flight,
+  as the other statements are, not one statement for a received batch; renewals likewise, gathered when they
+  meet, not one pod-wide `UPDATE` an interval. Rows are sorted by key in each statement;
+  `GatheredCheckpointsTest.twoPodsWritingTheSameItemsAtOnceDontDeadlock` checks it.
+- **Not built:** a metric of the gathered statements' sizes; the pod-wide renewal; the landed-summary reads
+  (still for later, §18.3's last paragraph).
+
+**Measured locally** (`SplitFanOutPerf`, 2,000 one-record items, audit on, pool 8; PERFORMANCE.md §13.3, last
+part): the split registry's statements an item fell **from 17 to 9** (Part A), as designed. Gathering then took
+them to **6.3 an item at 64 at once**, not the hoped-for 1 or 2: on a local Postgres each statement takes 0.02 to
+0.06 ms, so few meet another of their kind. Throughput did not change locally (329 against 324 items a second at
+64 at once; split's local pace is the Iceberg append, 86 ms of an item's 114). Where it should count is AWS,
+where each statement waits about 1 ms and more behind PgBouncer: §18.7 step 3, not yet run.

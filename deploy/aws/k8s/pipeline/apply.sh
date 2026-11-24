@@ -47,6 +47,11 @@ export CONVERT_OPTIONS="${SDH_CONVERT_OPTIONS:-$no_options}"
 # gives a role 40 server connections (k8s/infra/state.yaml), so 6 pods of more than 6 can queue there instead.
 export SPLIT_POOL_SIZE="${SDH_SPLIT_POOL_SIZE:-2}"
 [[ "$SPLIT_POOL_SIZE" =~ ^[1-9][0-9]*$ ]] || { echo "apply.sh: SDH_SPLIT_POOL_SIZE is a count: $SPLIT_POOL_SIZE" >&2; exit 2; }
+# How many items' registry statements of one kind a split pod gathers into one (sdh.split.registry-batch; 64, the
+# product's default; 1 runs each alone, as before STAGES.md §18).
+export SPLIT_REGISTRY_BATCH="${SDH_SPLIT_REGISTRY_BATCH:-64}"
+[[ "$SPLIT_REGISTRY_BATCH" =~ ^[1-9][0-9]*$ ]] \
+  || { echo "apply.sh: SDH_SPLIT_REGISTRY_BATCH is a count: $SPLIT_REGISTRY_BATCH" >&2; exit 2; }
 # Registry retention (sdh.stage.retention.*, the convert and transform stages; docs/DEPLOYMENT.md "Registry
 # retention"): unset, every row is kept, the product's default. SDH_STAGE_RETENTION_AFTER turns it on. The stage
 # refuses an after shorter than its input queue's retention or its reconciler's lookback, each plus a day, so a
@@ -246,7 +251,7 @@ deploy_pipeline() {
   local vars='$PIPELINE $ICEBERG_PREFIX $INBOX_SHA256 $CONVERT_INBOX_SHA256 $RECIPIENT_SHA256 $CONSUMER_SHA256'
   vars+=' $KAFKA_BROKERS $AWS_REGION $INTAKE_BUCKET $BRONZE_BUCKET $SILVER_BUCKET $GOLD_BUCKET'
   vars+=' $JOSE_PROVIDER $JOURNAL_LINGER $SPLIT_RECONCILE_GRACE $SPLIT_RECONCILE_INTERVAL'
-  vars+=' $SPLIT_FORMAT $SPLIT_OPTIONS $CONVERT_OPTIONS $SPLIT_POOL_SIZE'
+  vars+=' $SPLIT_FORMAT $SPLIT_OPTIONS $CONVERT_OPTIONS $SPLIT_POOL_SIZE $SPLIT_REGISTRY_BATCH'
   local stage
   for stage in landing splitter convert transform; do
     envsubst "$vars" < "$HERE/$stage-application.yml" > "$work/$stage-application.yml"

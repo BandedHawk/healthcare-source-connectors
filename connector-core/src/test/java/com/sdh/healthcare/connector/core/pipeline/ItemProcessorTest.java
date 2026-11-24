@@ -395,7 +395,7 @@ class ItemProcessorTest
     /**
      * An item is split under its item ID, and {@code item.split} reports
      * its landed digest. Processing it again sends {@code item.split} again,
-     * without reading the item.
+     * answered from its row, whether or not its bytes can still be opened.
      *
      * @throws Exception if the test fails to run
      */
@@ -426,11 +426,120 @@ class ItemProcessorTest
         int sent = publisher.sent.size();
         assertThat(processor().process(item.itemId(), item.digest(), () ->
         {
-            throw new AssertionError("a finished item isn't read");
+            throw new java.io.IOException("its bytes are gone");
         }, lease()).result()).isEqualTo(ItemProcessor.Result.COMPLETED);
         assertThat(publisher.sent).hasSize(sent + 1);
         assertThat(messages().getLast().messageId())
                 .isEqualTo(messages.getLast().messageId());
+    }
+
+    /**
+     * A fresh item with no failed piece has its completion numbered with
+     * its end of splitting, and is noted sent as of then, with no failure
+     * read (STAGES.md §18.3, part A); its end is the one the full path
+     * sends, field by field: sent again for the item processed again, and
+     * after a stop between its end of splitting and its sending.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void endsAFreshCleanItemAsTheFullPathWould() throws Exception
+    {
+        LandedItem item = land(csv(4));
+        ItemProcessor processor = processor();
+        assertThat(process(processor, item).result())
+                .isEqualTo(ItemProcessor.Result.COMPLETED);
+        ConnectorMessage first = messages().getLast();
+        assertThat(first).isInstanceOfSatisfying(ItemSplit.class, split ->
+        {
+            assertThat(split.completion()).isEqualTo(1);
+            assertThat(split.recordCount()).isEqualTo(4);
+            assertThat(split.failure()).isNull();
+        });
+        assertThat(row(item.itemId())).containsExactly("COMPLETED", "1",
+                "true", "true");
+
+        // Processed again: answered from its row, by the full path.
+        publisher.sent.clear();
+        process(processor(), item);
+        assertThat(messages()).containsExactly(first);
+
+        // Stopped after its end of splitting, numbered, before its end
+        // was sent: the full path sends it, as numbered.
+        LandedItem stopped = land(csv(4));
+        publisher.sent.clear();
+        // Its four records are sent; its item.split is not.
+        int base = publisher.calls.get();
+        publisher.fail = call -> call >= base + 4;
+        assertThatThrownBy(() -> process(processor(), stopped))
+                .isInstanceOf(Exception.class);
+        assertThat(row(stopped.itemId())).containsExactly("ARCHIVING", "1",
+                "true", "false");
+        publisher.fail = call -> false;
+        publisher.sent.clear();
+        assertThat(process(processor(), stopped).result())
+                .isEqualTo(ItemProcessor.Result.COMPLETED);
+        ConnectorMessage resumed = messages().getLast();
+        assertThat(resumed).isInstanceOfSatisfying(ItemSplit.class,
+                split -> assertThat(split.completion()).isEqualTo(1));
+        assertThat(row(stopped.itemId())).containsExactly("COMPLETED", "1",
+                "true", "true");
+        publisher.sent.clear();
+        process(processor(), stopped);
+        assertThat(messages()).containsExactly(resumed);
+    }
+
+    /**
+     * An item with a failed piece, or processed a second time, takes the
+     * full path: its failures are read, and its end numbered then.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void anItemWithAFailedPieceTakesTheFullPath() throws Exception
+    {
+        LandedItem item = batchWithABadMessage(new ArrayList<>());
+        ItemProcessor processor = processor();
+        assertThat(process(processor, item).result())
+                .isEqualTo(ItemProcessor.Result.COMPLETED);
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemProgressed.class, progress ->
+                        assertThat(progress.openCount()).isEqualTo(1));
+        assertThat(failures().failures(item.itemId())).hasSize(1);
+        // Not completed while a failure is open: completion 0, not 1.
+        assertThat(row(item.itemId())).containsExactly("COMPLETED", "0",
+                "false", "true");
+    }
+
+    /**
+     * An item's row as the fresh path writes it: its state, its completion
+     * number, whether it is completed, and whether its end is noted sent
+     * as of when its splitting ended or later.
+     *
+     * @param itemId the item
+     * @return those, as text
+     * @throws Exception if the row can't be read
+     */
+    List<String> row(UUID itemId) throws Exception
+    {
+        try (java.sql.Connection connection =
+                SplitTestSupport.database().getConnection();
+                java.sql.PreparedStatement select = connection
+                        .prepareStatement("SELECT state, completion,"
+                                + " completed, announced_at >= ended_at"
+                                + " FROM " + schema + ".split_item"
+                                + " WHERE item_id = ?"))
+        {
+            select.setObject(1, itemId);
+            try (java.sql.ResultSet rows = select.executeQuery())
+            {
+                assertThat(rows.next()).isTrue();
+                return List.of(rows.getString(1),
+                        String.valueOf(rows.getInt(2)),
+                        String.valueOf(rows.getBoolean(3)),
+                        String.valueOf(rows.getBoolean(4)));
+            }
+        }
     }
 
     /**
@@ -478,7 +587,9 @@ class ItemProcessorTest
     /**
      * Splitting an item times each of its steps as a phase of the split
      * stage (docs/PERFORMANCE.md §10): the checkpoints, the records, the
-     * file, the commit and its wait, and the sends.
+     * file, the commit and its wait, and the sends. A fresh item is
+     * started with no read first, so has no {@code resume}, and no
+     * failure read (STAGES.md §18.3, part A).
      *
      * @throws Exception if the test fails to run
      */
@@ -511,12 +622,14 @@ class ItemProcessorTest
                     }
                 });
             }
-            assertThat(phases).contains("resume", "start", "first_record",
+            assertThat(phases).contains("start", "first_record",
                     "batch_open", "records", "records_read",
                     "records_store", "write",
                     "publish_wait", "prepare", "append", "commit_queue",
                     "commit_group", "save", "send_wait", "archive", "open",
-                    "split", "failed_rows", "announce");
+                    "split", "announce", "checkpoint");
+            assertThat(phases).doesNotContain("resume", "failed_rows",
+                    "fail_store", "correction_rows");
         }
         finally
         {
@@ -827,7 +940,8 @@ class ItemProcessorTest
     }
 
     /**
-     * An item split before a crash is finished without reading it again.
+     * An item split before a crash is finished without reading it again,
+     * whether or not its bytes can still be opened.
      *
      * @throws Exception if the test fails to run
      */
@@ -846,7 +960,7 @@ class ItemProcessorTest
         publisher.fail = call -> false;
         assertThat(processor().process(item.itemId(), item.digest(), () ->
         {
-            throw new AssertionError("a split item isn't read");
+            throw new java.io.IOException("its bytes are gone");
         }, lease()).result()).isEqualTo(ItemProcessor.Result.COMPLETED);
     }
 

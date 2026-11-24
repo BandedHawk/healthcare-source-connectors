@@ -628,6 +628,15 @@ public final class ItemProcessor
     private Outcome run(UUID itemId, Landing landing, Opener opener,
             LeaseToken lease, Checkpoint.Cut cut) throws Exception
     {
+        if (cut == null)
+        {
+            // Most items are new: started with no read first (§18.3).
+            Outcome fresh = splitIfFresh(itemId, landing, opener, lease);
+            if (fresh != null)
+            {
+                return fresh;
+            }
+        }
         Optional<ItemCheckpoints.Stored> stored = pipeline.stored(itemId);
         boolean fresh = cut != null && (stored.isEmpty()
                 || stored.get().checkpoint().generation()
@@ -702,26 +711,124 @@ public final class ItemProcessor
                     fresh ? cut : null);
             timed("split", splitting);
         }
-        catch (ItemHeldException held)
+        catch (Exception failure)
+        {
+            return splitFailed(itemId, size, failure, fresh ? cut : null,
+                    landing, lease);
+        }
+        return finishCompletion(split.checkpoint(), landing, lease,
+                split.endedAt());
+    }
+
+    /**
+     * Splits an item if it is fresh, its first checkpoint written with no
+     * read first (STAGES.md §18.3, part A). The item is opened first, for
+     * its size; if it can't be, or it has a row already, or is too large,
+     * nothing is written and the caller takes it on as before, opening it
+     * again only if it is to be split: an item already done is answered
+     * from its row, whether or not its bytes are still there.
+     *
+     * @param itemId  the item's ID
+     * @param landing what came with it from landing
+     * @param opener  opens its bytes
+     * @param lease   its lease
+     * @return how it ended; null if it isn't fresh, for the caller
+     * @throws Exception if storage or the broker fails, once started
+     */
+    private Outcome splitIfFresh(UUID itemId, Landing landing,
+            Opener opener, LeaseToken lease) throws Exception
+    {
+        long opening = System.nanoTime();
+        SeekableByteSource bytes = null;
+        long size;
+        try
+        {
+            bytes = opener.open();
+            size = bytes.size();
+        }
+        catch (Exception notOpened)
+        {
+            // The full path opens it again, if it needs it, and answers.
+            closeQuietly(bytes);
+            return null;
+        }
+        long splitting = timed("open", opening);
+        IngestPipeline.SplitResult split;
+        try (SeekableByteSource open = bytes)
+        {
+            Optional<IngestPipeline.SplitResult> made = pipeline.splitIfFresh(
+                    open, itemId, lease, landing.refs());
+            if (made.isEmpty())
+            {
+                return null;
+            }
+            split = made.get();
+            timed("split", splitting);
+        }
+        catch (Exception failure)
+        {
+            return splitFailed(itemId, size, failure, null, landing, lease);
+        }
+        return finishCompletion(split.checkpoint(), landing, lease,
+                split.endedAt(), split.completion());
+    }
+
+    /**
+     * Closes an item's bytes that weren't used, any failure to ignored:
+     * nothing was read from them.
+     *
+     * @param bytes the bytes; null if not opened
+     */
+    private static void closeQuietly(SeekableByteSource bytes)
+    {
+        if (bytes == null)
+        {
+            return;
+        }
+        try
+        {
+            bytes.close();
+        }
+        catch (Exception ignored)
+        {
+            // Nothing was read; the caller opens it again if it needs it.
+        }
+    }
+
+    /**
+     * Answers a split that failed: an item held or interrupted is answered
+     * so, one that can't be split is failed, and anything else (storage or
+     * the broker) is thrown, for the item to be tried again later.
+     *
+     * @param itemId  the item
+     * @param size    its size, if it was opened
+     * @param failure why the split failed
+     * @param cut     the generation being started, if its checkpoint may
+     *                not be written yet; null for the item's own
+     * @param landing what came with it from landing
+     * @param lease   its lease
+     * @return how it ended
+     * @throws Exception the failure, if it isn't the item's own
+     */
+    private Outcome splitFailed(UUID itemId, long size, Exception failure,
+            Checkpoint.Cut cut, Landing landing, LeaseToken lease)
+            throws Exception
+    {
+        if (failure instanceof ItemHeldException)
         {
             return new Outcome(itemId, Result.HELD, 0, null);
         }
-        catch (ItemInterruptedException interrupted)
+        if (failure instanceof ItemInterruptedException interrupted)
         {
             return interrupt(pipeline.checkpoint(itemId).orElseThrow(),
                     landing, lease, interrupted.newer());
         }
-        catch (Exception failure)
+        if (!permanent(failure))
         {
-            if (!permanent(failure))
-            {
-                throw failure;
-            }
-            return fail(failingCheckpoint(itemId, size, failure,
-                    fresh ? cut : null), landing, lease);
+            throw failure;
         }
-        return finishCompletion(split.checkpoint(), landing, lease,
-                split.endedAt());
+        return fail(failingCheckpoint(itemId, size, failure, cut), landing,
+                lease);
     }
 
     /**
@@ -952,7 +1059,42 @@ public final class ItemProcessor
     private Outcome finishCompletion(Checkpoint checkpoint, Landing landing,
             LeaseToken lease, Instant endedAt) throws Exception
     {
+        return finishCompletion(checkpoint, landing, lease, endedAt, 0);
+    }
+
+    /**
+     * Sends {@code item.split} and writes {@code COMPLETED}, as {@link
+     * #finishCompletion(Checkpoint, Landing, LeaseToken, Instant)} does; for
+     * an item whose completion was numbered with its {@code ARCHIVING}
+     * checkpoint, without reading failures it can't have (STAGES.md §18.3,
+     * part A): its end is what that would send.
+     *
+     * @param checkpoint the {@code ARCHIVING} checkpoint, as stored
+     * @param landing    what came with the item from landing
+     * @param lease      its lease
+     * @param endedAt    when its splitting ended, as stored; null to read
+     *                   it
+     * @param completion its completion number, if numbered with that
+     *                   checkpoint; 0 if not
+     * @return the outcome
+     * @throws Exception if the broker or the store fails
+     */
+    private Outcome finishCompletion(Checkpoint checkpoint, Landing landing,
+            LeaseToken lease, Instant endedAt, int completion)
+            throws Exception
+    {
         UUID itemId = checkpoint.itemId();
+        if (completion > 0 && endedAt != null && checkpoint.clean())
+        {
+            Ended announced = announceClean(checkpoint, landing, endedAt,
+                    completion);
+            long completing = System.nanoTime();
+            pipeline.completeSent(
+                    checkpoint.withState(Checkpoint.State.COMPLETED), lease,
+                    failures != null);
+            timed("checkpoint", completing);
+            return completed(checkpoint, announced);
+        }
         // The checkpoint is the item's stored one, under its lease, so its
         // generation is the stored generation (docs/PERFORMANCE.md §13.3).
         Ended announced = announce(checkpoint, landing,
@@ -962,14 +1104,59 @@ public final class ItemProcessor
         pipeline.commitCheckpoint(
                 checkpoint.withState(Checkpoint.State.COMPLETED), lease);
         timed("checkpoint", completing);
+        return completed(checkpoint, announced);
+    }
+
+    /**
+     * Audits a completed item and gives its outcome.
+     *
+     * @param checkpoint its checkpoint
+     * @param announced  what ended it
+     * @return the outcome
+     */
+    private static Outcome completed(Checkpoint checkpoint, Ended announced)
+    {
         auditEnded(announced, Result.COMPLETED);
         Telemetry.get().audit("item.completed",
-                Fields.of(Attr.ITEM_ID, itemId)
+                Fields.of(Attr.ITEM_ID, checkpoint.itemId())
                         .with(Attr.COUNT, checkpoint.recordCount())
                         .with(Attr.BYTES, checkpoint.itemSize()));
         Telemetry.get().itemCompleted();
-        return new Outcome(itemId, Result.COMPLETED,
+        return new Outcome(checkpoint.itemId(), Result.COMPLETED,
                 checkpoint.recordCount(), null);
+    }
+
+    /**
+     * Sends the end of an item that can have no failure and no correction:
+     * one this attempt started, of generation 1, with no failed piece
+     * (STAGES.md §18.3, part A, rule 2). Its counts are those {@link
+     * #announce(Checkpoint, Landing, Instant, Integer)} would read: none.
+     *
+     * @param checkpoint its {@code ARCHIVING} checkpoint, clean
+     * @param landing    what came with it from landing
+     * @param endedAt    when its splitting ended, as stored
+     * @param completion its completion number, as stored
+     * @return what was sent
+     * @throws Exception if the broker fails
+     */
+    private Ended announceClean(Checkpoint checkpoint, Landing landing,
+            Instant endedAt, int completion) throws Exception
+    {
+        long started = System.nanoTime();
+        // None, as the checkpoint is clean; this forgets the item here.
+        List<CommittedRecords.Row> failed = pipeline.failedRows(checkpoint);
+        if (!failed.isEmpty())
+        {
+            throw new IllegalStateException("A clean item had failed rows");
+        }
+        ConnectorMessage message = SplitMessages.itemEnd(checkpoint, intake,
+                0, FailureStore.Counts.NONE, landing.digest(),
+                landing.refs(), endedAt, pipeline.clock().instant(),
+                SplitMessages.Corrected.NONE, completion);
+        pipeline.publishNow(List.of(message));
+        timed("announce", started);
+        return new Ended(checkpoint.itemId(), message,
+                checkpoint.recordCount(), 0);
     }
 
     /**

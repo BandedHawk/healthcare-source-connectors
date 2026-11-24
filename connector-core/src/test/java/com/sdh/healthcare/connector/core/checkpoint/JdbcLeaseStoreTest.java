@@ -46,10 +46,20 @@ class JdbcLeaseStoreTest
     @BeforeEach
     void setUp()
     {
-        store = new JdbcLeaseStore(TestPostgres.dataSource(), "sdh_lease",
-                Duration.ofSeconds(5));
+        store = newStore();
         store.createTableIfMissing();
         name = "lease-" + UUID.randomUUID();
+    }
+
+    /**
+     * Makes the store under test.
+     *
+     * @return one that runs each statement alone
+     */
+    JdbcLeaseStore newStore()
+    {
+        return new JdbcLeaseStore(TestPostgres.dataSource(), "sdh_lease",
+                Duration.ofSeconds(5));
     }
 
     /**

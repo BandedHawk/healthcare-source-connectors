@@ -130,10 +130,30 @@ public final class IngestPipeline implements AutoCloseable
      * @param endedAt     when its splitting ended, as stored with that
      *                    checkpoint; null if not known here, for the caller
      *                    to read (docs/PERFORMANCE.md §13.3)
+     * @param completion  the item's completion number, written with its
+     *                    {@code ARCHIVING} checkpoint for a fresh item with
+     *                    no failed piece, whose end needs no failure read
+     *                    (STAGES.md §18.3, part A); 0 if not, for the
+     *                    caller to read its failures and number it
      */
     public record SplitResult(UUID itemId, long recordCount,
-            Checkpoint checkpoint, Instant endedAt)
+            Checkpoint checkpoint, Instant endedAt, int completion)
     {
+
+        /**
+         * An outcome whose completion isn't numbered yet.
+         *
+         * @param itemId      the file's id
+         * @param recordCount how many records it was split into
+         * @param checkpoint  the checkpoint after the split phase
+         * @param endedAt     when its splitting ended, as stored; null if
+         *                    not known here
+         */
+        public SplitResult(UUID itemId, long recordCount,
+                Checkpoint checkpoint, Instant endedAt)
+        {
+            this(itemId, recordCount, checkpoint, endedAt, 0);
+        }
     }
 
     /** The pipeline's settings. */
@@ -467,6 +487,68 @@ public final class IngestPipeline implements AutoCloseable
     }
 
     /**
+     * Runs the split phase for a landed item if it is fresh: its first
+     * checkpoint is written only if it has no row, in one statement, in
+     * place of reading the row first and then writing it (STAGES.md §18.3,
+     * part A, rule 1). An item that has a row, or is too large (refused by
+     * {@link #split(SeekableByteSource, UUID, LeaseToken, LandedRefs)},
+     * with no row, as before), is left for that to take on: nothing is
+     * written for it here.
+     * <p>
+     * No path deletes a {@code split_item} row, so an item whose row this
+     * makes has no failure and no correction (§18.8, decision 2). If none
+     * of its pieces fails either, its completion is numbered with its
+     * {@code ARCHIVING} checkpoint (rule 3), given in the outcome, and its
+     * end needs no failure read.
+     *
+     * @param source the item's bytes, opened
+     * @param itemId the item's ID
+     * @param lease  the item's lease, held by the caller
+     * @param refs   what landing kept about the item
+     * @return the outcome; empty if the item isn't fresh, or is too large
+     * @throws SplitException           if the item can't be split, once
+     *                                  started
+     * @throws ItemInterruptedException if a newer generation waits, between
+     *                                  batches
+     * @throws Exception                if storage or the broker fails
+     *                                  beyond retrying
+     */
+    public Optional<SplitResult> splitIfFresh(SeekableByteSource source,
+            UUID itemId, LeaseToken lease, LandedRefs refs) throws Exception
+    {
+        long size = source.size();
+        if (size > settings.split().limits().maxItemBytes())
+        {
+            return Optional.empty();
+        }
+        Checkpoint current = Checkpoint.start(itemId,
+                itemFingerprint(itemId), settings.format(), size,
+                clock.instant(), settings.version(), Checkpoint.Cut.FIRST);
+        long starting = System.nanoTime();
+        boolean made = checkpoints.start(current, lease);
+        timed("start", starting);
+        if (!made)
+        {
+            return Optional.empty();
+        }
+        failureFree.put(itemId, current.generation());
+        Telemetry.get().audit("item.started",
+                Fields.of(Attr.ITEM_ID, current.itemId())
+                        .with(Attr.FORMAT, current.format())
+                        .with(Attr.BYTES, current.itemSize())
+                        .with(Attr.GENERATION, current.generation()));
+        try
+        {
+            return Optional.of(run(current, source, lease, refs, true));
+        }
+        catch (Exception failure)
+        {
+            failureFree.remove(itemId);
+            throw failure;
+        }
+    }
+
+    /**
      * Runs the split phase for a landed item, as
      * {@link #split(SeekableByteSource, UUID, LeaseToken, LandedRefs)}
      * does, or starts a later generation of it (STAGES.md §15.8): a
@@ -575,7 +657,7 @@ public final class IngestPipeline implements AutoCloseable
         Checkpoint attempt = current;
         try
         {
-            return run(attempt, source, lease, refs);
+            return run(attempt, source, lease, refs, false);
         }
         catch (Exception failure)
         {
@@ -769,8 +851,23 @@ public final class IngestPipeline implements AutoCloseable
      * @return the outcome
      * @throws Exception if splitting, storage or the broker fails
      */
+    /**
+     * Splits an item from its checkpoint to its end: commits and publishes
+     * each batch, then writes {@code ARCHIVING}.
+     *
+     * @param start  the checkpoint to go on from, as stored
+     * @param source the item's bytes
+     * @param lease  the item's lease
+     * @param refs   what landing kept about the item
+     * @param fresh  whether this attempt made the item's row, so that, if
+     *               no piece fails, its completion can be numbered with
+     *               {@code ARCHIVING} (STAGES.md §18.3, part A)
+     * @return the outcome
+     * @throws Exception as {@link #split(SeekableByteSource, UUID,
+     *                   LeaseToken, LandedRefs, Checkpoint.Cut)} does
+     */
     private SplitResult run(Checkpoint start, SeekableByteSource source,
-            LeaseToken lease, LandedRefs refs) throws Exception
+            LeaseToken lease, LandedRefs refs, boolean fresh) throws Exception
     {
         republish(start, refs);
         Checkpoint current = start.published(start.committedSeq());
@@ -867,13 +964,20 @@ public final class IngestPipeline implements AutoCloseable
                 // pieces (docs/PERFORMANCE.md §3.4).
                 current = current.withClean();
             }
-            Instant endedAt = commitCheckpoint(current, lease);
+            // A fresh, clean first generation can have no failure, so its
+            // completion is numbered now (STAGES.md §18.3, part A, rule 3).
+            boolean numbered = fresh && current.clean()
+                    && current.generation() == 1;
+            ItemCheckpoints.Written written = checkpoints.save(current, lease,
+                    numbered ? ItemCheckpoints.Also.FIRST_COMPLETION
+                            : ItemCheckpoints.Also.NOTHING);
             timed("archive", archiving);
             Telemetry.get().audit("item.split",
                     Fields.of(Attr.ITEM_ID, current.itemId())
                             .with(Attr.COUNT, current.recordCount()));
             return new SplitResult(current.itemId(), current.recordCount(),
-                    current, endedAt);
+                    current, written.endedAt(),
+                    numbered ? written.completion() : 0);
         }
         finally
         {
@@ -1458,6 +1562,28 @@ public final class IngestPipeline implements AutoCloseable
     Instant commitCheckpoint(Checkpoint next, LeaseToken lease)
     {
         return checkpoints.save(next, lease);
+    }
+
+    /**
+     * Writes an item's {@code COMPLETED} checkpoint once its end is sent,
+     * noting it sent as of when its splitting ended, in the same write
+     * (STAGES.md §18.3, part A, rule 4): for an item whose completion was
+     * numbered with its {@code ARCHIVING} checkpoint, which can have had no
+     * failure since.
+     *
+     * @param completed the checkpoint, {@code COMPLETED}
+     * @param lease     the item's lease
+     * @param announced whether to note the end sent; false for a stage
+     *                  with no fail store, which never notes it
+     * @throws LeaseLostException    if the lease was lost or taken over
+     * @throws IllegalStateException if the database can't be reached
+     */
+    void completeSent(Checkpoint completed, LeaseToken lease,
+            boolean announced)
+    {
+        checkpoints.save(completed, lease, announced
+                ? ItemCheckpoints.Also.ANNOUNCED
+                : ItemCheckpoints.Also.NOTHING);
     }
 
     // ---- publishing ----

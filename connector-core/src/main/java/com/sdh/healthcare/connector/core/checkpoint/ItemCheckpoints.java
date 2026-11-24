@@ -51,6 +51,12 @@ import javax.sql.DataSource;
  * {@link #save} makes that the checkpoint. The caller resolves a pending
  * checkpoint found at resume by looking for the batch's last record in the
  * table.
+ * <p>
+ * The statements items make most ({@link #start}, {@link #prepare},
+ * {@link #save}, {@link #load}, {@link #noteLanded}, {@link #sameAs}) can
+ * be gathered: made at once by many items, each kind runs as one statement
+ * for them all, each row still fenced by its own epoch ({@link
+ * RegistryBatcher}; STAGES.md §18.3, part B).
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -102,6 +108,113 @@ public final class ItemCheckpoints
     /** How long a statement may run, in seconds. */
     private final int queryTimeoutSeconds;
 
+    /** Gathers fresh items' first checkpoints ({@link #start}). */
+    private final RegistryBatcher<Row, Result> starts;
+
+    /** Gathers checkpoint writes ({@link #save}). */
+    private final RegistryBatcher<Row, Result> saves;
+
+    /** Gathers pending checkpoints ({@link #prepare}). */
+    private final RegistryBatcher<Row, Result> prepares;
+
+    /** Gathers reads of items' rows ({@link #load}). */
+    private final RegistryBatcher<UUID, Optional<Raw>> loads;
+
+    /** Gathers when items landed ({@link #noteLanded}). */
+    private final RegistryBatcher<Landing, Boolean> landings;
+
+    /** Gathers reads of the items items copy ({@link #sameAs}). */
+    private final RegistryBatcher<UUID, Optional<UUID>> copiesRead;
+
+    /**
+     * What else a checkpoint write notes, for an item whose end can be
+     * known before it is sent (STAGES.md §18.3, part A).
+     */
+    public enum Also
+    {
+
+        /** Nothing else. */
+        NOTHING,
+
+        /**
+         * The item's completion is numbered with the write, as {@link
+         * #announced} would number it for {@code item.split}: for an
+         * {@code ARCHIVING} write of an item that can have no failure.
+         */
+        FIRST_COMPLETION,
+
+        /**
+         * The item's end is noted as sent, its failures as at when its
+         * splitting ended ({@link #markAnnounced}), for a {@code COMPLETED}
+         * write of an item that can have no failure.
+         */
+        ANNOUNCED
+    }
+
+    /**
+     * What a checkpoint write left in the row.
+     *
+     * @param endedAt    when the item's splitting ended; null if it hasn't
+     * @param completion the item's completion number
+     */
+    public record Written(Instant endedAt, int completion)
+    {
+    }
+
+    /**
+     * A checkpoint to write, encoded, under the lease's epoch.
+     *
+     * @param itemId     the item
+     * @param epoch      the lease's epoch
+     * @param checkpoint the checkpoint, encoded and MAC'd
+     * @param state      its state
+     * @param ended      whether the item's splitting has ended
+     * @param generation its generation
+     * @param version    the version that cut it
+     * @param also       what else the write notes
+     */
+    private record Row(UUID itemId, long epoch, String checkpoint,
+            String state, boolean ended, int generation, String version,
+            Also also)
+    {
+    }
+
+    /**
+     * What came of one row of a write.
+     *
+     * @param written    whether the row was written: false if a fence (or,
+     *                   for a start, a row already there) left it
+     * @param endedAt    when the item's splitting ended, as now stored
+     * @param completion the item's completion number, as now stored
+     */
+    private record Result(boolean written, Instant endedAt, int completion)
+    {
+
+        /** A row not written. */
+        static final Result NONE = new Result(false, null, 0);
+    }
+
+    /**
+     * An item's row as read, not yet verified.
+     *
+     * @param checkpoint its checkpoint, encoded
+     * @param pending    its pending checkpoint, encoded; null if none
+     * @param endedAt    when its splitting ended; null before
+     */
+    private record Raw(String checkpoint, String pending, Instant endedAt)
+    {
+    }
+
+    /**
+     * When an item landed.
+     *
+     * @param itemId   the item
+     * @param landedAt when it landed
+     */
+    private record Landing(UUID itemId, Instant landedAt)
+    {
+    }
+
     /**
      * Creates the store.
      *
@@ -115,6 +228,24 @@ public final class ItemCheckpoints
     public ItemCheckpoints(DataSource dataSource, String schema,
             CheckpointCodec codec, Duration queryTimeout)
     {
+        this(dataSource, schema, codec, queryTimeout, 1);
+    }
+
+    /**
+     * Creates the store, gathering items' statements made at once.
+     *
+     * @param dataSource   connections to the database
+     * @param schema       the schema its table is in
+     * @param codec        writes and verifies checkpoints
+     * @param queryTimeout how long a statement may run; at least a second
+     * @param gather       the most items one gathered statement takes; 1
+     *                     runs each item's statements alone
+     * @throws IllegalArgumentException if the schema isn't a plain
+     *                                  identifier, or the limit is under 1
+     */
+    public ItemCheckpoints(DataSource dataSource, String schema,
+            CheckpointCodec codec, Duration queryTimeout, int gather)
+    {
         if (!IDENTIFIER.matcher(schema).matches())
         {
             throw new IllegalArgumentException(
@@ -127,6 +258,17 @@ public final class ItemCheckpoints
         this.codec = codec;
         this.queryTimeoutSeconds =
                 (int) Math.max(1, queryTimeout.toSeconds());
+        this.starts = new RegistryBatcher<>(gather, Row::itemId,
+                this::startAll);
+        this.saves = new RegistryBatcher<>(gather, Row::itemId,
+                this::saveAll);
+        this.prepares = new RegistryBatcher<>(gather, Row::itemId,
+                this::prepareAll);
+        this.loads = new RegistryBatcher<>(gather, id -> id, this::loadAll);
+        this.landings = new RegistryBatcher<>(gather, Landing::itemId,
+                this::landAll);
+        this.copiesRead = new RegistryBatcher<>(gather, id -> id,
+                this::copiesOf);
     }
 
     /**
@@ -270,26 +412,43 @@ public final class ItemCheckpoints
      */
     public Optional<Stored> load(UUID itemId)
     {
-        String sql = "SELECT checkpoint, pending, ended_at FROM " + table
-                + " WHERE item_id = ?";
+        return loads.run(itemId).map(raw -> new Stored(
+                decode(raw.checkpoint(), itemId),
+                raw.pending() == null ? null : decode(raw.pending(), itemId),
+                raw.endedAt()));
+    }
+
+    /**
+     * Reads items' rows, in one statement.
+     *
+     * @param itemIds the items, each once
+     * @return each one's row, as read; empty if it has none
+     * @throws IllegalStateException if the database can't be reached
+     */
+    private List<Optional<Raw>> loadAll(List<UUID> itemIds)
+    {
+        String sql = "SELECT item_id, checkpoint, pending, ended_at FROM "
+                + table + " WHERE item_id = ANY (?)";
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement select = connection.prepareStatement(sql))
         {
             select.setQueryTimeout(queryTimeoutSeconds);
-            select.setObject(1, itemId);
+            select.setArray(1, connection.createArrayOf("uuid",
+                    itemIds.toArray()));
+            Map<UUID, Raw> found = new HashMap<>();
             try (ResultSet rows = select.executeQuery())
             {
-                if (!rows.next())
+                while (rows.next())
                 {
-                    return Optional.empty();
+                    Timestamp endedAt = rows.getTimestamp(4);
+                    found.put(rows.getObject(1, UUID.class),
+                            new Raw(rows.getString(2), rows.getString(3),
+                                    endedAt == null ? null
+                                            : endedAt.toInstant()));
                 }
-                Checkpoint checkpoint = decode(rows.getString(1), itemId);
-                String pending = rows.getString(2);
-                Timestamp endedAt = rows.getTimestamp(3);
-                return Optional.of(new Stored(checkpoint,
-                        pending == null ? null : decode(pending, itemId),
-                        endedAt == null ? null : endedAt.toInstant()));
             }
+            return itemIds.stream()
+                    .map(id -> Optional.ofNullable(found.get(id))).toList();
         }
         catch (SQLException failure)
         {
@@ -314,19 +473,106 @@ public final class ItemCheckpoints
      */
     public Instant save(Checkpoint checkpoint, LeaseToken lease)
     {
+        return save(checkpoint, lease, Also.NOTHING).endedAt();
+    }
+
+    /**
+     * Writes an item's checkpoint as {@link #save(Checkpoint, LeaseToken)}
+     * does, noting what else is asked with it (STAGES.md §18.3, part A).
+     *
+     * @param checkpoint the checkpoint
+     * @param lease      the item's lease
+     * @param also       what else to note
+     * @return when splitting ended and the completion number, as now
+     *         stored
+     * @throws LeaseLostException    if the lease was lost or taken over
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Written save(Checkpoint checkpoint, LeaseToken lease, Also also)
+    {
         Checkpoint.State state = checkpoint.state();
         boolean ended = state == Checkpoint.State.ARCHIVING
                 || state == Checkpoint.State.FAILING
                 || state == Checkpoint.State.COMPLETED
                 || state == Checkpoint.State.FAILED
                 || state == Checkpoint.State.INTERRUPTED;
+        Result result = saves.run(row(checkpoint, lease, ended, also));
+        if (!result.written())
+        {
+            throw new LeaseLostException(LeaseLostException.Reason.FENCED);
+        }
+        return new Written(result.endedAt(), result.completion());
+    }
+
+    /**
+     * Writes a fresh item's first checkpoint, {@code SPLITTING}, if the
+     * item has no row (STAGES.md §18.3, part A): one statement in place of
+     * reading the row and then writing it. An item with a row is left as it
+     * is, for the caller to read and go on with.
+     *
+     * @param checkpoint the checkpoint, {@code SPLITTING}
+     * @param lease      the item's lease
+     * @return true if the row was made, so the item is fresh; false if it
+     *         was there
+     * @throws IllegalArgumentException if it isn't {@code SPLITTING}
+     * @throws LeaseLostException       if the lease was lost
+     * @throws IllegalStateException    if the database can't be reached
+     */
+    public boolean start(Checkpoint checkpoint, LeaseToken lease)
+    {
+        if (checkpoint.state() != Checkpoint.State.SPLITTING)
+        {
+            throw new IllegalArgumentException("Only while splitting");
+        }
+        return starts.run(row(checkpoint, lease, false, Also.NOTHING))
+                .written();
+    }
+
+    /**
+     * A checkpoint to write, encoded, once the lease is checked.
+     *
+     * @param checkpoint the checkpoint
+     * @param lease      the item's lease
+     * @param ended      whether the item's splitting has ended
+     * @param also       what else to note
+     * @return the row
+     * @throws LeaseLostException if the lease was lost
+     */
+    private Row row(Checkpoint checkpoint, LeaseToken lease, boolean ended,
+            Also also)
+    {
+        lease.checkHeld();
+        return new Row(checkpoint.itemId(), lease.epoch(),
+                codec.encode(checkpoint), checkpoint.state().name(), ended,
+                checkpoint.generation(), checkpoint.version(), also);
+    }
+
+    /**
+     * Writes items' checkpoints in one statement, each fenced by its own
+     * epoch and generation, as {@link #save} describes.
+     *
+     * @param rows the checkpoints, each of another item
+     * @return what came of each
+     * @throws IllegalStateException if the database can't be reached
+     */
+    private List<Result> saveAll(List<Row> rows)
+    {
         String sql = """
                 INSERT INTO %1$s AS s
                        (item_id, epoch, checkpoint, pending, state, ended_at,
-                        updated_at, generation, version)
-                VALUES (?, ?, ?, NULL, ?,
-                        CASE WHEN ? THEN clock_timestamp() END,
-                        clock_timestamp(), ?, ?)
+                        updated_at, generation, version, completion,
+                        completed, announced_at)
+                SELECT v.item_id, v.epoch, v.checkpoint, NULL, v.state,
+                       CASE WHEN v.ended THEN clock_timestamp() END,
+                       clock_timestamp(), v.generation, v.version,
+                       CASE WHEN v.numbered THEN 1 ELSE 0 END, v.numbered,
+                       CASE WHEN v.announced THEN clock_timestamp() END
+                  FROM unnest(?::uuid[], ?::bigint[], ?::text[], ?::text[],
+                              ?::boolean[], ?::integer[], ?::text[],
+                              ?::boolean[], ?::boolean[])
+                       AS v(item_id, epoch, checkpoint, state, ended,
+                            generation, version, numbered, announced)
+                 ORDER BY v.item_id
                 ON CONFLICT (item_id) DO UPDATE
                    SET epoch = EXCLUDED.epoch,
                        checkpoint = EXCLUDED.checkpoint,
@@ -337,18 +583,129 @@ public final class ItemCheckpoints
                                 THEN EXCLUDED.ended_at
                            ELSE COALESCE(s.ended_at, EXCLUDED.ended_at) END,
                        completion = CASE
-                           WHEN EXCLUDED.generation > s.generation THEN 0
+                           WHEN EXCLUDED.generation > s.generation
+                                THEN EXCLUDED.completion
+                           WHEN EXCLUDED.completed AND NOT s.completed
+                                THEN s.completion + 1
                            ELSE s.completion END,
-                       completed = s.completed
-                           AND EXCLUDED.generation <= s.generation,
+                       completed = CASE
+                           WHEN EXCLUDED.generation > s.generation
+                                THEN EXCLUDED.completed
+                           ELSE s.completed OR EXCLUDED.completed END,
+                       announced_at = CASE
+                           WHEN EXCLUDED.announced_at IS NULL
+                                THEN s.announced_at
+                           ELSE GREATEST(s.announced_at, s.ended_at) END,
                        updated_at = EXCLUDED.updated_at,
                        generation = EXCLUDED.generation,
                        version = EXCLUDED.version
                  WHERE s.epoch <= EXCLUDED.epoch
                    AND s.generation <= EXCLUDED.generation
-                RETURNING s.ended_at"""
+                RETURNING s.item_id, s.ended_at, s.completion"""
                 .formatted(table);
-        return write(sql, checkpoint, lease, ended);
+        return written(sql, rows, true);
+    }
+
+    /**
+     * Writes fresh items' first checkpoints in one statement, each only if
+     * its item has no row.
+     *
+     * @param rows the checkpoints, each of another item
+     * @return what came of each: written if its row was made
+     * @throws IllegalStateException if the database can't be reached
+     */
+    private List<Result> startAll(List<Row> rows)
+    {
+        String sql = """
+                INSERT INTO %1$s
+                       (item_id, epoch, checkpoint, pending, state,
+                        updated_at, generation, version)
+                SELECT v.item_id, v.epoch, v.checkpoint, NULL, v.state,
+                       clock_timestamp(), v.generation, v.version
+                  FROM unnest(?::uuid[], ?::bigint[], ?::text[], ?::text[],
+                              ?::boolean[], ?::integer[], ?::text[],
+                              ?::boolean[], ?::boolean[])
+                       AS v(item_id, epoch, checkpoint, state, ended,
+                            generation, version, numbered, announced)
+                 ORDER BY v.item_id
+                ON CONFLICT (item_id) DO NOTHING
+                RETURNING item_id, ended_at, completion""".formatted(table);
+        return written(sql, rows, true);
+    }
+
+    /**
+     * Runs a statement over rows given as arrays, and says which were
+     * written by the item IDs it returns.
+     *
+     * @param sql   the statement, taking the arrays of {@link Row}'s fields
+     *              in order (or, if not whole, the item, epoch, checkpoint
+     *              and generation), returning the item, {@code ended_at}
+     *              and the completion number (or the item alone)
+     * @param rows  the rows, each of another item
+     * @param whole whether the statement takes every field
+     * @return what came of each row
+     * @throws IllegalStateException if the database can't be reached
+     */
+    private List<Result> written(String sql, List<Row> rows, boolean whole)
+    {
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement statement =
+                        connection.prepareStatement(sql))
+        {
+            statement.setQueryTimeout(queryTimeoutSeconds);
+            int i = 1;
+            statement.setArray(i++, connection.createArrayOf("uuid",
+                    rows.stream().map(Row::itemId).toArray()));
+            statement.setArray(i++, connection.createArrayOf("bigint",
+                    rows.stream().map(Row::epoch).toArray()));
+            statement.setArray(i++, connection.createArrayOf("text",
+                    rows.stream().map(Row::checkpoint).toArray()));
+            if (whole)
+            {
+                statement.setArray(i++, connection.createArrayOf("text",
+                        rows.stream().map(Row::state).toArray()));
+                statement.setArray(i++, connection.createArrayOf("boolean",
+                        rows.stream().map(Row::ended).toArray()));
+            }
+            statement.setArray(i++, connection.createArrayOf("integer",
+                    rows.stream().map(Row::generation).toArray()));
+            if (whole)
+            {
+                statement.setArray(i++, connection.createArrayOf("text",
+                        rows.stream().map(Row::version).toArray()));
+                statement.setArray(i++, connection.createArrayOf("boolean",
+                        rows.stream().map(row -> row.also()
+                                == Also.FIRST_COMPLETION).toArray()));
+                statement.setArray(i, connection.createArrayOf("boolean",
+                        rows.stream().map(row -> row.also()
+                                == Also.ANNOUNCED).toArray()));
+            }
+            Map<UUID, Result> done = new HashMap<>();
+            try (ResultSet returned = statement.executeQuery())
+            {
+                while (returned.next())
+                {
+                    UUID itemId = returned.getObject(1, UUID.class);
+                    if (!whole)
+                    {
+                        done.put(itemId, new Result(true, null, 0));
+                        continue;
+                    }
+                    Timestamp endedAt = returned.getTimestamp(2);
+                    done.put(itemId, new Result(true,
+                            endedAt == null ? null : endedAt.toInstant(),
+                            returned.getInt(3)));
+                }
+            }
+            return rows.stream()
+                    .map(row -> done.getOrDefault(row.itemId(), Result.NONE))
+                    .toList();
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Checkpoint store unavailable",
+                    failure);
+        }
     }
 
     /**
@@ -408,31 +765,36 @@ public final class ItemCheckpoints
      */
     public void prepare(Checkpoint next, LeaseToken lease)
     {
-        String sql = """
-                UPDATE %s
-                   SET epoch = ?, pending = ?, updated_at = clock_timestamp()
-                 WHERE item_id = ? AND epoch <= ? AND generation = ?"""
-                .formatted(table);
         lease.checkHeld();
-        try (Connection connection = dataSource.getConnection();
-                PreparedStatement update = connection.prepareStatement(sql))
+        Row row = new Row(next.itemId(), lease.epoch(), codec.encode(next),
+                null, false, next.generation(), null, Also.NOTHING);
+        if (!prepares.run(row).written())
         {
-            update.setQueryTimeout(queryTimeoutSeconds);
-            update.setLong(1, lease.epoch());
-            update.setString(2, codec.encode(next));
-            update.setObject(3, next.itemId());
-            update.setLong(4, lease.epoch());
-            update.setInt(5, next.generation());
-            if (update.executeUpdate() != 1)
-            {
-                throw new LeaseLostException(LeaseLostException.Reason.FENCED);
-            }
+            throw new LeaseLostException(LeaseLostException.Reason.FENCED);
         }
-        catch (SQLException failure)
-        {
-            throw new IllegalStateException("Checkpoint store unavailable",
-                    failure);
-        }
+    }
+
+    /**
+     * Keeps items' pending checkpoints in one statement, each fenced by its
+     * own epoch and generation.
+     *
+     * @param rows the pending checkpoints, each of another item
+     * @return what came of each
+     * @throws IllegalStateException if the database can't be reached
+     */
+    private List<Result> prepareAll(List<Row> rows)
+    {
+        String sql = """
+                UPDATE %s AS s
+                   SET epoch = v.epoch, pending = v.pending,
+                       updated_at = clock_timestamp()
+                  FROM unnest(?::uuid[], ?::bigint[], ?::text[],
+                              ?::integer[])
+                       AS v(item_id, epoch, pending, generation)
+                 WHERE s.item_id = v.item_id AND s.epoch <= v.epoch
+                   AND s.generation = v.generation
+                RETURNING s.item_id""".formatted(table);
+        return written(sql, rows, false);
     }
 
     /**
@@ -752,16 +1114,36 @@ public final class ItemCheckpoints
      */
     public void noteLanded(UUID itemId, Instant landedAt)
     {
+        landings.run(new Landing(itemId, landedAt));
+    }
+
+    /**
+     * Notes when items landed, in one statement; the first noted stays.
+     *
+     * @param landings the items and when they landed, each item once
+     * @return true for each
+     * @throws IllegalStateException if the database can't be reached
+     */
+    private List<Boolean> landAll(List<Landing> landings)
+    {
         String sql = """
-                INSERT INTO %s (item_id, landed_at) VALUES (?, ?)
+                INSERT INTO %s (item_id, landed_at)
+                SELECT * FROM unnest(?::uuid[], ?::timestamptz[])
+                 ORDER BY 1
                 ON CONFLICT (item_id) DO NOTHING""".formatted(landed);
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement insert = connection.prepareStatement(sql))
         {
             insert.setQueryTimeout(queryTimeoutSeconds);
-            insert.setObject(1, itemId);
-            insert.setTimestamp(2, Timestamp.from(landedAt));
+            insert.setArray(1, connection.createArrayOf("uuid",
+                    landings.stream().map(Landing::itemId).toArray()));
+            insert.setArray(2, connection.createArrayOf("timestamptz",
+                    landings.stream()
+                            .map(landing -> Timestamp.from(
+                                    landing.landedAt()))
+                            .toArray()));
             insert.executeUpdate();
+            return landings.stream().map(landing -> true).toList();
         }
         catch (SQLException failure)
         {
@@ -780,18 +1162,37 @@ public final class ItemCheckpoints
      */
     public Optional<UUID> sameAs(UUID itemId)
     {
-        String sql = "SELECT same_as FROM " + copies + " WHERE item_id = ?";
+        return copiesRead.run(itemId);
+    }
+
+    /**
+     * The earlier items some items are exact copies of, in one statement.
+     *
+     * @param itemIds the items, each once
+     * @return each one's earlier item; empty if none was noted
+     * @throws IllegalStateException if the database can't be reached
+     */
+    private List<Optional<UUID>> copiesOf(List<UUID> itemIds)
+    {
+        String sql = "SELECT item_id, same_as FROM " + copies
+                + " WHERE item_id = ANY (?)";
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement select = connection.prepareStatement(sql))
         {
             select.setQueryTimeout(queryTimeoutSeconds);
-            select.setObject(1, itemId);
+            select.setArray(1, connection.createArrayOf("uuid",
+                    itemIds.toArray()));
+            Map<UUID, UUID> found = new HashMap<>();
             try (ResultSet rows = select.executeQuery())
             {
-                return rows.next()
-                        ? Optional.of(rows.getObject(1, UUID.class))
-                        : Optional.empty();
+                while (rows.next())
+                {
+                    found.put(rows.getObject(1, UUID.class),
+                            rows.getObject(2, UUID.class));
+                }
             }
+            return itemIds.stream()
+                    .map(id -> Optional.ofNullable(found.get(id))).toList();
         }
         catch (SQLException failure)
         {
@@ -985,51 +1386,6 @@ public final class ItemCheckpoints
                 }
             }
             return found;
-        }
-        catch (SQLException failure)
-        {
-            throw new IllegalStateException("Checkpoint store unavailable",
-                    failure);
-        }
-    }
-
-    /**
-     * Runs a fenced write of a checkpoint.
-     *
-     * @param sql        the statement: item, epoch, checkpoint, state,
-     *                   ended; returning the row's {@code ended_at}
-     * @param checkpoint the checkpoint
-     * @param lease      the item's lease
-     * @param ended      whether the item's splitting has ended
-     * @return the row's {@code ended_at} as written; null if unset
-     * @throws LeaseLostException    if no row was written
-     * @throws IllegalStateException if the database can't be reached
-     */
-    private Instant write(String sql, Checkpoint checkpoint, LeaseToken lease,
-            boolean ended)
-    {
-        lease.checkHeld();
-        try (Connection connection = dataSource.getConnection();
-                PreparedStatement upsert = connection.prepareStatement(sql))
-        {
-            upsert.setQueryTimeout(queryTimeoutSeconds);
-            upsert.setObject(1, checkpoint.itemId());
-            upsert.setLong(2, lease.epoch());
-            upsert.setString(3, codec.encode(checkpoint));
-            upsert.setString(4, checkpoint.state().name());
-            upsert.setBoolean(5, ended);
-            upsert.setInt(6, checkpoint.generation());
-            upsert.setString(7, checkpoint.version());
-            try (ResultSet written = upsert.executeQuery())
-            {
-                if (!written.next())
-                {
-                    throw new LeaseLostException(
-                            LeaseLostException.Reason.FENCED);
-                }
-                Timestamp endedAt = written.getTimestamp(1);
-                return endedAt == null ? null : endedAt.toInstant();
-            }
         }
         catch (SQLException failure)
         {

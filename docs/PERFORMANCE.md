@@ -1877,3 +1877,22 @@ queue busy at the moment a pod starts).
   deployed so scaled-up pods start.
 - J (pool 2, the same image) ran 4.8 splitter pods on average with none failing, so K's 1.3 was the startup bug's
   doing, not pool 2's; J's split was 44.8 items a second, 9.3 a pod, K's pace a pod.
+
+**The registry change of STAGES.md §18, measured locally (2026-11-24).** `SplitFanOutPerf`, 2,000 items of one
+200-byte record, audit on (100 ms seal), pool 8, `pg_stat_statements` on; the same build with
+`-Dperf.fanout.registry-batch=64` and `=1`. The split registry's statements (its `split_item`, `split_landed`,
+`split_copy` and `sdh_lease` ones) an item, against 17 before the change (2026-11-23, 64 at once):
+
+| at once | gathered (64): items/s | statements | transactions | not gathered (1): items/s | statements | transactions |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 15.7 | 9.0 | 16.5 | 15.6 | 9.0 | 16.5 |
+| 8 | 69.4 | 7.0 | 8.8 | 70.0 | 9.0 | 10.8 |
+| 64 | 328.8 | 6.3 | 6.3 | 324.2 | 9.0 | 9.1 |
+
+- **Part A does what it was for:** 9 registry statements an item, at any load, against 17.
+- **Gathering only gathers what meets:** at 64 at once the 9 became 6.3 (the checkpoint save, 3 an item alone,
+  1.17 gathered). Each statement takes 0.02 to 0.06 ms on a local Postgres, so few overlap. Transactions an item
+  include the audit journal's and the append queue's; Postgres CPU fell from 3.2 to 2.8 s.
+- **Throughput is unchanged locally,** whose pace is the Iceberg append (86 ms of an item's 114), not the
+  registry. The test that counts is AWS, where each statement waited 55 to 71 ms for a connection in runs K and
+  L: STAGES.md §18.7 step 3, not yet run.

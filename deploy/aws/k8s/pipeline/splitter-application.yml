@@ -61,6 +61,9 @@ sdh:
     # used ~0.65 of a core.
     concurrency: 8
     consumers: 8
+    # The most items' registry statements of one kind gathered into one when asked for at once (STAGES.md §18.3;
+    # 64, the product's default, unless a load test asks: apply.sh SDH_SPLIT_REGISTRY_BATCH; 1 runs each alone).
+    registry-batch: ${SPLIT_REGISTRY_BATCH}
     # One group of a pod's files waits for the shared commit at a time (the default). Four at once was tried
     # (docs/PERFORMANCE.md §10, runs 45-46, 2026-11-18): a turn took ~6.7 groups, not ~2.6, but each group was
     # smaller and took its own turn, turns slowed to 1.03 s (0.58), and split fell from 70 items a second to 61.

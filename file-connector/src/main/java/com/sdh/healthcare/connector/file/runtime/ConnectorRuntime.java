@@ -349,9 +349,11 @@ public final class ConnectorRuntime implements AutoCloseable
                     new AuditTables(stage.registrySchema()),
                     ItemProcessor.STAGE + "/" + properties.connectorId(),
                     keys);
+            // Statements asked for at once gathered into one (§18.3).
+            int gather = properties.split().registryBatch();
             JdbcLeaseStore leases = new JdbcLeaseStore(dataSource,
                     properties.lease().jdbc().table(),
-                    Duration.ofSeconds(10));
+                    Duration.ofSeconds(10), gather);
             leases.createTableIfMissing();
             LeaseKeeper.Settings leaseSettings = leaseSettings(
                     properties.lease());
@@ -376,7 +378,7 @@ public final class ConnectorRuntime implements AutoCloseable
                     splitRecords, keys.wrap(), kek.get()));
             ItemCheckpoints checkpoints = new ItemCheckpoints(dataSource,
                     stage.registrySchema(), new CheckpointCodec(ids),
-                    Duration.ofSeconds(10));
+                    Duration.ofSeconds(10), gather);
             checkpoints.createTableIfMissing();
             DrainGate gate = DrainGate.open(dataSource, stage,
                     ItemProcessor.STAGE,

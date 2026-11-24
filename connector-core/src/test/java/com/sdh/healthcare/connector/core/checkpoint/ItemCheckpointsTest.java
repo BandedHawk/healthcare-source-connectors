@@ -59,10 +59,20 @@ class ItemCheckpointsTest
     @BeforeEach
     void table()
     {
-        checkpoints = new ItemCheckpoints(database, schema,
+        checkpoints = newCheckpoints();
+        checkpoints.createTableIfMissing();
+    }
+
+    /**
+     * Makes the store under test, in the test's schema.
+     *
+     * @return one that runs each statement alone
+     */
+    ItemCheckpoints newCheckpoints()
+    {
+        return new ItemCheckpoints(database, schema,
                 new CheckpointCodec(new RecordIds(new byte[32])),
                 Duration.ofSeconds(10));
-        checkpoints.createTableIfMissing();
     }
 
     /**
@@ -249,6 +259,65 @@ class ItemCheckpointsTest
         assertThat(checkpoints.countFinished()).isOne();
         assertThat(checkpoints.load(item).orElseThrow().endedAt())
                 .isEqualTo(ended);
+    }
+
+    /**
+     * A fresh item's first checkpoint is written only if it has no row; its
+     * end, written with its first completion and then as sent, numbers it
+     * and notes it sent as of its end, as the separate statements would
+     * (STAGES.md §18.3, part A).
+     *
+     * @throws Exception if the database can't be read
+     */
+    @Test
+    void startsAFreshItemAndNotesItsEndWithItsWrites() throws Exception
+    {
+        Checkpoint first = start(item);
+        assertThat(checkpoints.start(first, new Held(1))).isTrue();
+        assertThat(checkpoints.start(first, new Held(1))).isFalse();
+        assertThat(checkpoints.load(item)).hasValue(
+                new ItemCheckpoints.Stored(first, null, null));
+        assertThatThrownBy(() -> checkpoints.start(
+                first.withState(Checkpoint.State.ARCHIVING), new Held(1)))
+                .isInstanceOf(IllegalArgumentException.class);
+        Checkpoint archiving = first.withState(Checkpoint.State.ARCHIVING);
+        ItemCheckpoints.Written ended = checkpoints.save(archiving,
+                new Held(1), ItemCheckpoints.Also.FIRST_COMPLETION);
+        assertThat(ended.completion()).isOne();
+        assertThat(ended.endedAt()).isNotNull();
+        ItemCheckpoints.Written again = checkpoints.save(archiving,
+                new Held(1), ItemCheckpoints.Also.FIRST_COMPLETION);
+        assertThat(again).isEqualTo(ended);
+        assertThat(announcedAt(item)).isNull();
+        checkpoints.save(archiving.withState(Checkpoint.State.COMPLETED),
+                new Held(1), ItemCheckpoints.Also.ANNOUNCED);
+        assertThat(announcedAt(item)).isEqualTo(ended.endedAt());
+        assertThat(checkpoints.announced(item, true)).isOne();
+        assertThat(checkpoints.countFinished()).isOne();
+    }
+
+    /**
+     * When an item's end was last noted as sent.
+     *
+     * @param itemId the item
+     * @return the time; null if never
+     * @throws Exception if the database can't be read
+     */
+    Instant announcedAt(UUID itemId) throws Exception
+    {
+        try (Connection connection = database.getConnection();
+                PreparedStatement select = connection.prepareStatement(
+                        "SELECT announced_at FROM " + schema
+                                + ".split_item WHERE item_id = ?"))
+        {
+            select.setObject(1, itemId);
+            try (ResultSet rows = select.executeQuery())
+            {
+                assertThat(rows.next()).isTrue();
+                return rows.getTimestamp(1) == null ? null
+                        : rows.getTimestamp(1).toInstant();
+            }
+        }
     }
 
     /**
