@@ -1834,7 +1834,8 @@ The rest is the item protocol itself (STAGES.md §8): each checkpoint is a recov
 item against another pod, and the failure and correction reads keep a resubmission's end right. So a few more
 statements could go, but **the large saving is structural: the record stages' way, one claim, register and
 complete for a batch of items, which for one-record items would take split from about 20 statements a document
-to a few.** That is a design change to the split stage's checkpoints and leases, for after runs K and L.
+to a few.** That is a design change to the split stage's checkpoints and leases: proposed in STAGES.md §18 after runs K
+and L.
 
 **Run K on AWS (pool 2, 2026-11-24 01:30 UTC; C-CDA, 30,000 objects at 100 a second, one graceful landing
 failover).** Every object landed exactly once and every item ended at transform; nothing was left. Split ended its

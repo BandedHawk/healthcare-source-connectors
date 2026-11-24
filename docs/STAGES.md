@@ -3144,3 +3144,155 @@ Each part builds and passes its tests before the next:
    columns, full Javadoc, strict doclint), since it is built on this repository's library and parent and its
    classes have `convert-stage`'s shape. Rejected: Google style, as harmonization's and mapping's Java, which
    matches the code it calls rather than the library it extends.
+
+## 18. Split's registry work for many items at once (proposed 2026-11-24, for review)
+
+Asked for by the user ("Yes, design it") after AWS runs K and L (PERFORMANCE.md §13.3). Not built.
+
+### 18.1 Why
+
+A split item is one C-CDA document, and the split stage does its registry work an item at a time: about 16
+Postgres transactions a document (§8's protocol), against well under one a record at the record stages, which
+claim, store and complete a received batch together (§7). At 6 connections a pod (run L) a pod splits 1.85 times
+as fast as at 2 (run K), but then the splitter's role fills PgBouncer's 40 server connections, and every step on
+Postgres slows: a larger pool only moves the queue. In run L a split item took 3.34 s, of which about 1.3 s was
+its own Postgres steps and 1.55 s the shared Iceberg append. The splitting itself is under 2% of an item.
+
+**The aim:** split's Postgres transactions down from about 16 a document to 2 or fewer at load, with nothing in
+§8 weakened: every write still fenced by the item's lease epoch, every recovery point kept, every message and
+audit event as now.
+
+### 18.2 What an item does now (fresh, generation 1, one batch, no failed piece: nearly every C-CDA item)
+
+| # | Step (timed as) | Statement | What it guarantees |
+|---:|---|---|---|
+| 1 | lease | `INSERT ... ON CONFLICT DO UPDATE ... WHERE expired RETURNING epoch` | one pod on the item; the epoch that fences its writes |
+| 2 | `refs` | insert into `split_landed` | the item's landed time, for time to gold |
+| 3 | `refs` | select from `split_copy` | the earlier item it copies, named in its end |
+| 4 | `run()` | select its `split_item` row | an item already done is answered with its end again, not split again |
+| 5 | `resume` | select its row again | the same, after `started()` may have written (a later generation only) |
+| 6 | `start` | upsert `SPLITTING` | a resume point from the item's first byte |
+| 7 | `prepare` | update `pending` | a crash between append and save is settled at resume, with no re-split |
+| 8 | (append) | the shared commit's queue, on its own pool | one Iceberg commit for many items (§3.7) |
+| 9 | `save` | `pending` becomes the checkpoint | the batch is stored |
+| 10 | `archive` | `ARCHIVING`, `ended_at` set (`RETURNING`) | splitting ended; every end sent carries this time |
+| 11 | `fail_store` | `SELECT clock_timestamp()` | when the failures were read |
+| 12 | `fail_store` | count its failures | open failures make its end `item.progress` |
+| 13 | `correction_rows` | any corrections? | corrected pieces are counted in its end |
+| 14 | `announce` | completion number `+ 1` (`RETURNING`) | each end is numbered before it is sent (§15.6e) |
+| 15 | `announce` | `announced_at` | an end is sent again if its failures change after |
+| 16 | `checkpoint` | `COMPLETED` | done |
+| 17 | lease | release | the next pod needn't wait the lease out |
+
+Steps 11 to 13 read what a fresh, clean, first-generation item **cannot** have. Its failures are written only by
+its own step 12's announce, and an operator's correction needs a failure. No path deletes a `split_item` row
+(the registry pruner keeps to the record stages' tables). So if this attempt created the item's row, the item has
+no failures and no corrections: the counts are 0, the end is `item.split`, and the reads add nothing.
+
+### 18.3 The design: two parts, either useful alone
+
+**Part A: fewer statements for the common item.** Its rules are judged per item, and anything else takes §8's
+path unchanged.
+
+1. **Steps 4 to 6 become one:** `INSERT` the `SPLITTING` row `ON CONFLICT DO NOTHING RETURNING`. A row returned
+   means the item is fresh: this attempt made it. No row means it was there already, and the item takes today's
+   path from step 4, reading it. A redelivered, resumed, held, failing or later-generation item costs one
+   statement more than now, and a fresh one two fewer. The item's size is checked first, as now, so an item too
+   large is still refused with no row (§6.3 of DESIGN.md); its size is the source's, opened before the insert.
+2. **Steps 11 to 13 are left out** when the row was made by this attempt (rule 1), the generation is 1, and no
+   piece failed (the checkpoint's `withClean` mark, which `failed_rows` already uses to skip its scan). The end
+   is `item.split`,
+   counts from the checkpoint alone, as `SplitMessages.unstored` makes them now for a stage with no fail store.
+   Any failed piece, or any other case, takes today's path.
+3. **Step 14 joins step 10:** the `ARCHIVING` write also sets the completion number, when step 2's rule holds
+   (an end with no open failure is a completion; there are none). `RETURNING ended_at, completion`.
+4. **Step 15 joins step 16:** `COMPLETED` and `announced_at` in one write, after the end is sent; `announced_at`
+   is the `ARCHIVING` write's time, which is before any failure could exist (none can until this end is out).
+
+The common item then makes 9 statements on the stage's pool (lease, landed, copy, start, prepare, save,
+archive, completed, release), against 16 to 17 now.
+
+**Part B: one statement for many items (a group commit for the registry).** A pod has up to
+`concurrency × consumers` items in flight (64 on AWS), each on its own thread, each making the same few
+statements at about the same time. Each statement of Part A's list (and today's, for the uncommon paths) goes
+through a `RegistryBatcher` of its kind, as the Iceberg append already goes through the shared commit (§3.7):
+
+- A caller hands its row (item, epoch, values) to the batcher and waits. If no statement of that kind is running,
+  it runs at once, with that row alone. Rows that arrive while one runs are gathered, and run together as the
+  next statement when it finishes, up to a limit (`sdh.split.registry.batch.max`, 64). **No linger:** at low load
+  each item runs alone, as now, with no added wait; at load the batches grow by themselves, and only then.
+- The statement takes the rows as arrays (`unnest(?::uuid[], ?::bigint[], ...)`, as `StageRegistry` already
+  does), **sorted by item**, so two pods' statements on overlapping lease rows take their locks in one order and
+  can't deadlock.
+- **Each row keeps its own fence:** `WHERE s.item_id = v.item_id AND s.epoch <= v.epoch`, and `RETURNING
+  item_id, ...`. A row absent from what is returned is that caller's `LeaseLostException(FENCED)`, and only its
+  own: the others' rows are written.
+- **One statement is one transaction:** it is written for every row or for none. A failure (Postgres down, a
+  timeout) is given to every caller in it, and each goes on as it does now on that failure: the batch is tried
+  again in place, its stored steps recognised.
+- **An item's own steps keep their order:** an item waits for each statement before its next, so no two of its
+  steps are ever in flight, and gathering never reorders them.
+- Leases: one acquire for the items of a received batch (`RETURNING name, epoch` for those granted; an item not
+  granted is answered as now, `LeaseHeldException`, the batch retried); renewals of every live item lease of the
+  pod in one `UPDATE` each interval, instead of one each; releases gathered like the rest.
+
+**Together:** about 9 statements an item, gathered 8 to 16 at a time at load (measured, not assumed: §18.6),
+comes to about 1 transaction an item, against 16. It also takes the load off PgBouncer's server connections,
+which run L filled, so a pool of 6 is enough at 6 pods (36 of the role's 40).
+
+**Not in this design, for later if measured worth it:** the landed-summary lookup (`lookup_row`, 0.12–0.17 s an
+item) is an Iceberg read, not Postgres. The items of one landing group share data files, so a pod could read a
+file's summary rows once for every item it holds from it. It reads wrapped keys and references, not PHI, but it is
+a cache, with its own sizing and expiry: a design of its own, after A and B are measured.
+
+### 18.4 What stays as it is
+
+- §8's protocol: one lease per item, fenced writes, the three-step commit (pending, append, save), the recovery
+  points, the reconcilers, the item and record messages, the audit events, the shared append (§3.7).
+- Every uncommon path (resume, hold, release, failure, correction, reprocess, a later generation, an item of many
+  batches) runs today's code, its statements through the batchers too (Part B), but none left out (Part A).
+- The admin commands and the reconcilers, which call the per-item methods.
+- The record stages: their registry already works by batch.
+
+### 18.5 What could go wrong, and how each is closed
+
+| Risk | Closed by |
+|---|---|
+| A step left out (Part A) was not empty after all | The rule is "this attempt made the row, generation 1, no failed piece"; anything else takes the full path. A test makes every case that could break it: a redelivered item, one resumed, a later generation, a failed piece, an operator's correction on an earlier item it copies; each must take the full path. Checked again if anything ever deletes `split_item` rows. |
+| One item's fence fails a whole statement | Per-row `WHERE` and `RETURNING`; tested with one stale epoch among many |
+| Deadlock between pods' multi-row statements | Rows sorted by item in every statement; a test runs two batchers on overlapping rows at once |
+| A slow statement holds many items | The same as one slow statement now holds one; the batch limit bounds it; `pool_wait` and a new `registry_batch` size metric show it |
+| Order of an item's own steps | An item waits for each step: one in flight at a time |
+| The `ARCHIVING` and completion number joined (A3) | Only under A2's rule; the number is the one today's step 14 would give (the first completion, 1); a test compares the two paths' messages, field by field |
+| `announced_at` taken earlier (A4) | Under A2's rule there is no failure to change before the end is out; the reconciler's "changed ends" query (§15.8.10 step 5) is tested to find a failure made after |
+| PgBouncer in transaction mode | Single statements with array parameters, as `StageRegistry` runs now through it |
+
+### 18.6 Tests and measurement
+
+- `ItemCheckpointsTest`, `ItemProcessorTest`: each Part A rule, and each case that must fall back.
+- A `RegistryBatcherTest`: rows run alone when idle, gathered under load, a fence failure for one row only, a
+  database failure for all, sorted order, the limit.
+- `SplitFanOutPerf` with `pg_stat_statements` (§13.3's table): statements an item before and after, at 1, 8 and
+  64 items at once; the target is about 9 at 1 item at once (Part A), about 1 at 64 (Part B).
+- AWS, as runs K and L: the same load at pool 6, then at pool 2, with DESIGN.md revision (ez) in the images.
+  Judged on split items a second a pod, `pool_wait`, the splitter role's server connections, Postgres CPU, and
+  $ a million documents (the tuning rule: cost and nodes as well as speed). The next limit is likeliest the
+  shared Iceberg append (1.55 s of L's 3.34 s an item) or the splitter's CPU.
+
+### 18.7 Order of building, once agreed
+
+1. Part A, behind no setting (it changes no behaviour), with its tests and the local statement counts.
+2. Part B's `RegistryBatcher`, first for the checkpoint writes (steps 6, 7, 9, 10, 16), then the lease and the
+   landed, copy and other reads; `sdh.split.registry.batch.max` (64; 1 turns gathering off).
+3. Images with (ez), A and B; one AWS session: runs at pool 6 and 2.
+4. Then, if the numbers ask for it: the landed-summary reads (§18.3, last paragraph), or the shared append.
+
+### 18.8 For the user to decide
+
+1. **Gathering with no linger** (a statement runs at once when none of its kind is running), as proposed, or a
+   fixed linger of a few milliseconds, which gathers more at middling load at the cost of that wait on every item.
+   Proposed: no linger.
+2. **Part A's leaving out steps 11 to 13** rests on "no path deletes a `split_item` row". Keep that as a rule of
+   the design (a split registry retention, if ever added, would then have to keep the rows of items with
+   failures, as the record stages' does)?
+3. **The split pool's default:** 2 now. With Part B, 2 may be enough again; to be decided on the AWS numbers.
