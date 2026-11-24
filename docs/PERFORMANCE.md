@@ -1724,6 +1724,41 @@ check. The images did not yet have registry retention (off by default, so no eff
   which retention must keep. The last item finished at 22:25 UTC, so the second visit can be from
   2026-11-24 23:25 UTC on (`up`, `apply.sh` with the same settings, `retention-check.sh verify`).
 
+**Second session (2026-11-24, 01:00 to 06:00 UTC), the same maxima and nodes, reset before each run.**
+
+- **Retention, second visit: as expected.** Run 71's `stage_item.completed_at` was moved back a day (the visit
+  came 3 hours after it ended, not 25), then `apply.sh` with the settings above and `retention-check.sh verify`.
+  `stage.registry_pruned`: convert deleted all 30,000 items and their 30,000 records; transform deleted the
+  15,000 finished items and their records, and kept the 15,000 with open failures, their 15,000 records and all
+  15,000 failures.
+- **The 378 items: not checked.** The journal query looked for the landing journal in a schema named like
+  landing; it is in `public`, beside the lease table, so it found nothing, and the reset before the next run
+  dropped the database. Still open; run J below has the same kind of crash, and its journal was lost the same
+  way at its reset.
+- **G and H: the CSV crash was `apply.sh`'s.** In `"${SDH_SPLIT_OPTIONS:-{}}"` bash ends the default at the first
+  `}`, so options that were set gained a stray `}`, and the splitter's settings failed to parse (`expected
+  <block end>, but found '}'`). Fixed (the empty map is a variable). Both then ran:
+
+  | Run | Load | Records | End to end | Records a minute | Split | Splitter pods, avg / max |
+  |---|---|---|---|---|---|---|
+  | G | 3,000 CSV items of 100 rows | 300,000 | 2,456 s | 7,329 | 3,000 items by 147 s | 1.3 / 6 |
+  | H | 30 CSV items of 10,000 rows | 300,000 | 2,260 s | 7,965 | 30 items by 78 s | 1.2 / 6 |
+
+  Exactly once, nothing left behind, no record failed at convert; transform kept every record as it came, since
+  its set maps C-CDA only (`TRANSFORM_UNSUPPORTED`, as expected). Split finishes a CSV load in a minute or two;
+  **convert and transform, at 12 and 18 pods, set the pace: about 120 to 130 records a second**, against
+  C-CDA's 46 to 57 documents a second, each record a row, not a document, through the same per-record work. The
+  first measurement of a format other than C-CDA on AWS (DEPLOYMENT.md "Formats").
+- **J: C-CDA, 30,000 at 100 a second, two landing crashes with the faster trigger** (signalled on the holder's
+  first `item.landed` line of a group). Exactly once, 0 left behind, no container restarted; 44.8 documents a
+  second end to end.
+  - Both crashes came **mid-group**: the standbys took the lease 70 and 62 s later (its expiry) and announced
+    105 and 124 items of the crashed holder's last group, items it had committed but not announced. The topic
+    holds 30,000 `ccda-push.landed` messages, one for each item: those were their first announcements, not
+    repeats. **The re-announce path is now shown by a crash**, not only by run 68's kill with no grace.
+  - The report says of the last standby "NO item landed after": its log follower missed it, though the items
+    after the second crash all landed. A report gap, to look at.
+
 ### 13.3 Why split is slower than transform: its database pool (2026-11-24)
 
 **The question (the user's):** transform does far more work a document than split, yet split is the stage that
@@ -1811,3 +1846,33 @@ EXCLUSIVE one, each held up behind open writes past the query timeout, and holdi
 while it waited. **Fixed as DESIGN.md revision (ez)**: an index or column already there is found in the catalogs
 and its statement left out; not yet in the AWS images. Per pod, K's split did about 8.5 items a second, run 69's
 pace, so it stands as the pool-2 baseline; run L (pool 6, the same image) is the comparison.
+
+**Run L on AWS (pool 6, 2026-11-24 03:22 UTC; the same load and image as K).** Exactly once, 0 left behind,
+no container restarted, and this time no splitter pod failed to start (the lock waits of revision (ez) need the
+queue busy at the moment a pod starts).
+
+| | K, pool 2 | L, pool 6 |
+|---|---|---|
+| Split, items a second (all pods) | 11.0 | 56.5 |
+| Splitter pods, avg / max | 1.3 / 6 (14 failed to start) | 3.6 / 6 |
+| **Split, items a second a pod** | **8.5** | **15.7** |
+| A split item, mean (s) | 5.49 | 3.34 |
+| of which `append` / `commit_queue` | 4.35 / 3.39 | 1.55 / 0.51 |
+| `pool_wait`, mean a take (ms) / takes an item | 55 / 20 | 71 / 19 |
+| Postgres steps (`refs`, `save`, `archive`, `announce`), mean (s) | 0.19, 0.11, 0.13, 0.15 | 0.26, 0.18, 0.18, 0.24 |
+| Postgres connections of `splitter_ccda_push`, at most | 8 | 40 |
+| End to end, documents a second | 10.9 | 46.0 |
+
+- **A pod splits about 1.85 times as fast with 6 connections**, so the pool was a limit. But the wait for a
+  connection did not shrink: each Postgres step took longer, and the splitter's role reached 40 server
+  connections, PgBouncer's `default_pool_size`. **The limit moved from the pod's pool to the database's share
+  for the role**: with more pods, more connections only queue at PgBouncer, and each item still makes about 20
+  statements. More pool alone is not the answer at scale.
+- K's long `commit_queue` is the other half: on one or two pods each group waited for a commit of its own
+  (3,849 commits, against L's 2,043 with more groups in each).
+- **So the structural change stands as the larger lever:** the record stages' way, one claim, register and
+  complete for a batch of items (above), which cuts the statements, not just their wait. A pool of 6 for split is
+  worth setting meanwhile (`SDH_SPLIT_POOL_SIZE`; 6 pods × 6 = 36 under PgBouncer's 40), with revision (ez)
+  deployed so scaled-up pods start.
+- J (pool 2, the same image) ran 4.8 splitter pods on average with none failing, so K's 1.3 was the startup bug's
+  doing, not pool 2's; J's split was 44.8 items a second, 9.3 a pod, K's pace a pod.

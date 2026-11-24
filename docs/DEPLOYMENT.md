@@ -116,17 +116,18 @@ What changes it:
 
 ## Formats: what has been tested
 
-**Only C-CDA has been tested end to end and under load.** It has a mapping set (US Core 6.1, in the mapping
-repository), and every measurement in PERFORMANCE.md is of it. The product also splits and stores the formats
-below, each with its own unit and integration tests of splitting; **none has been run end to end, at load, or
-through a mapping set, and each needs that testing before a customer relies on it** (PERFORMANCE.md §11.1 says
+**Only C-CDA has been tested end to end and under load with a mapping set.** It has one (US Core 6.1, in the
+mapping repository), and nearly every measurement in PERFORMANCE.md is of it. CSV has been run end to end at load
+on the AWS PoC, with no mapping set (PERFORMANCE.md §13.2, runs G and H). The product also splits and stores the
+other formats below, each with its own unit and integration tests of splitting; **none of those has been run end
+to end, at load, or through a mapping set, and each needs that testing before a customer relies on it** (PERFORMANCE.md §11.1 says
 what to measure):
 
 | Format (`format:`) | What a record is | Not yet tested |
 |---|---|---|
 | `x12` | a transaction set (`ST`, by default), a functional group (`GS`) or an interchange (`ISA`), each a valid standalone interchange | end to end, at load (a transaction a file, and batches such as an 837 of thousands of claims); no mapping set |
 | `edifact` | a message (`UNH`, by default) or an interchange, each a valid standalone interchange | end to end, at load; no mapping set |
-| `csv` | a row (RFC 4180), optionally with the header prepended | end to end, at load (large files of many rows); no mapping set |
+| `csv` | a row (RFC 4180), optionally with the header prepended | Run end to end at load on AWS (2026-11-24): 300,000 records as 3,000 files of 100 rows and as 30 of 10,000, exactly once, about 120 to 130 records a second at 12 convert and 18 transform pods. No mapping set; files of millions of rows not tried |
 | `delimited` | a run of lines found by a pattern, for proprietary line formats | end to end, at load; no mapping set |
 | `xml` | an element by name, as a standalone document (generic XML other than C-CDA) | end to end, at load; no mapping set |
 | `fhir` | a resource (by default a `Bundle`) from a single resource, an array or NDJSON; or groups of N resources, for bulk export | end to end, at load (bulk-export NDJSON especially); the transform stage's mapping is for C-CDA |
