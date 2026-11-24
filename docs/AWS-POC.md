@@ -354,7 +354,8 @@ changes it lists are reviewed.
   `versions_kept_days` (7), then expires; a delete marker with nothing under it is removed. The stages check this
   under the hipaa profile (`store-versioning`, DESIGN.md §7.6), so their role may `s3:GetBucketVersioning`.
   `poc.sh reset` and `harness-down` empty buckets with deletes, so what they delete stays as noncurrent versions,
-  at the usual storage price, for 7 days.
+  at the usual storage price, for 7 days. **Once applied, it can't be undone:** S3 lets a bucket's versioning be
+  suspended, never removed.
 - **WAL archiving.** Postgres (stock `postgres:18.4`) archives each WAL segment by copying it into an outbox on its
   data volume (`archive.sh`, synced before Postgres is told it is safe), and closes a segment at least every
   minute (`archive_timeout`). A sidecar, the official `amazon/aws-cli` image pinned by digest, sends the outbox
@@ -374,8 +375,17 @@ changes it lists are reviewed.
   harness pipeline is up. Delete the kept data directory by hand once the restore is checked.
 - **Window.** Backups expire after 7 days like the versions, so the oldest point a restore reaches is the oldest
   base backup still kept: with no session for a week, none is left until the next `up` takes one.
-- **Limits.** The outbox shares the 10 GiB volume with the database: an outage of S3 long enough to fill it stops
-  Postgres's writes. A base backup is one object per file (`aws s3 cp`), so one over 5 TB is out of reach, which
+- **Capacity guard.** The outbox, the WAL and the database share the 10 GiB volume, so a shipper that can't send
+  would fill it, and a full volume stops Postgres. Four guards:
+  - `poc.sh up` refuses to start without the backup bucket and role (run `bootstrap` first), the likeliest cause;
+  - the sidecar `capacity-guard` (`guard.sh`) checks the free space every 30 s, warns under 25%, makes Postgres
+    read-only under 10% (`ALTER SYSTEM SET default_transaction_read_only`, kept across restarts), and lifts its
+    hold at 20%. While held, the stages' writes fail and are retried, as in a database outage, and `poc.sh`'s own
+    writes (`reset`, `harness-up`) fail too;
+  - the wal-shipper warns once a minute while anything has waited over 10 minutes;
+  - `poc.sh status` (and `up`) show the volume's free space, the outbox, the archive's last failure and any hold.
+  The hold hasn't been tried on AWS: what each stage does on a read-only database is untested there.
+- **Limits.** A base backup is one object per file (`aws s3 cp`), so one over 5 TB is out of reach, which
   the PoC's databases are far from.
 
 ### 8.2 TLS for a pipeline deployed from the reference settings (2026-11-24, HIPAA.md §11.4 L5)
@@ -397,6 +407,9 @@ Built, not yet run on AWS:
   landing source (an HTTP push intake, for the harness), the key aliases (`alias/sdh-poc-harness-...`), and the
   convert stage's next registry (there is no transform stage). `AwsTarget` cuts the database off by stopping
   Postgres, since the harness no longer goes through PgBouncer.
+- **What the plaintext listener means:** its principal is a super user, so any client that reaches port 9092 can
+  also read and write the harness's topics and change the ACLs; the SCRAM users' ACLs bind only 9094. Fine for
+  synthetic data, not a layout for PHI (HIPAA.md §8.5; HIPAA-OPERATIONS.md §2.6, "Securing the broker").
 
 ## 9. If the data were real PHI
 

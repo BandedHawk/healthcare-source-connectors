@@ -269,6 +269,13 @@ setting of the storage account, which a stage can't read: check it yourself and 
 The check doesn't see the lifecycle rule for noncurrent versions: check that when you deploy, and at each restore
 test.
 
+On S3, versioning can't be turned off again once on, only suspended: versions already made are kept, and later
+overwrites and deletes replace a single "null" version, so they can't be restored (Object Lock needs versioning on
+for good). GCS and Azure Blob versioning can be turned off. Until the lifecycle rule removes them, noncurrent
+versions are stored at the bucket's usual price, and the pipeline's maintenance makes them every day. Who may
+delete versions, suspend versioning or change the lifecycle decides how safe they are: HIPAA-OPERATIONS.md §7,
+"Protecting the backups".
+
 An erasure (`erase`, `purge`) deletes the current objects; their noncurrent versions stay until the lifecycle rule
 expires them. Set that rule to the shortest window your recovery plan allows, and say so in your retention policy.
 

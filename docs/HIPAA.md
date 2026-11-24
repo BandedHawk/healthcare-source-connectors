@@ -508,6 +508,10 @@ The outstanding work is restated, with what's decided since, in §11.
      TLS, are refused.
    - **Still untested:** mTLS to Kafka (a client certificate in place of SCRAM), AWS MSK's IAM login, and TLS
      through PgBouncer. The sandbox and the AWS PoC still run both in plaintext (§8.5).
+   - **The ACLs bind only the principals they name.** A broker that keeps a plaintext listener whose principal is a
+     super user (as the AWS PoC's does, for its performance pipeline: §8.5) lets anyone who reaches that listener
+     read and write every pipeline's topics and change the ACLs; the profile can't see the broker's listeners.
+     What the buyer must do to secure the broker is HIPAA-OPERATIONS.md §2.6, "Securing the broker".
 8. **Re-keying existing data:** built 2026-11-21 (P3, CONTROL-API-DESIGN.md §15.7).
    - `rotate` moves a stage's new data to another KEK; `rekey`, with a second person's approval, re-wraps what
      the stage stores under the old one, and `keys` shows when nothing is left under it. The key custodian then
@@ -558,6 +562,19 @@ The outstanding work is restated, with what's decided since, in §11.
       since again from a control log kept in the store. The procedure is HIPAA-OPERATIONS.md §7 (D8).
     - The hipaa profile refuses to start a stage whose buckets don't keep versions, asking the store (built
       2026-11-24, DESIGN.md revision (fg)). Not built: the store-damaged walk that opens each object (`--deep`).
+    - **Gap: the backups' integrity is the operator's, and the product can't check it.** The identity that writes
+      the database's backups can usually overwrite them, and an administrator allowed to delete versions or
+      change the lifecycle can remove every restore point of the store. The profile sees only whether versioning
+      is on, not who may change it, and not the lifecycle rule. To close or narrow it (HIPAA-OPERATIONS.md §7,
+      "Protecting the backups"): write-once storage (Object Lock in compliance mode, or the provider's
+      equivalent), backups in an account the production identities can't change, no delete-version or
+      versioning rights for production roles, and alerts on those calls.
+    - **Versioning can't be fully undone on S3** (only suspended), and noncurrent versions cost storage until the
+      lifecycle rule removes them: plan the rule first (HIPAA-OPERATIONS.md §7; DEPLOYMENT.md, "Object store
+      versions").
+    - **A full database stops the pipeline** (nothing is lost; the stages wait), and WAL archiving that can't
+      write makes it likelier. The product doesn't watch the database's storage: HIPAA-OPERATIONS.md §7.2 lists
+      what the buyer monitors, and when to alert.
 13. **Reference configuration with the profile on: built 2026-11-20** (`deploy/reference/`, DESIGN revision (eh)).
     - Each stage's settings (landing, split, convert, transform), under `hipaa` with nothing waived:
       - Kafka over `SASL_SSL`, with the login from the environment;
@@ -657,7 +674,12 @@ the product must prove its capabilities:
 - a BAA;
 - private subnets;
 - Kafka TLS and ACLs, and Postgres TLS: built for a pipeline deployed from `deploy/reference/` (the harness's,
-  §11.4 L5), not yet for the performance pipeline, which keeps its plaintext paths so its runs stay comparable;
+  §11.4 L5), not yet for the performance pipeline, which keeps its plaintext paths so its runs stay comparable.
+  The broker's plaintext listener is a super user (`User:ANONYMOUS` in `super.users`), as its controller, KEDA
+  and the performance pipeline need, so anything that reaches port 9092 (the namespaces labelled as infra
+  clients) can read and write the harness's topics too, and change any ACL: the SCRAM users' ACLs bind only
+  clients on 9094. Acceptable for synthetic data; real PHI needs the listener gone (HIPAA-OPERATIONS.md §2.6,
+  "Securing the broker");
 - CloudTrail data events;
 - a durable audit sink: the journal now keeps every event in Postgres, which survives `down` on its EBS volume, but
   the collector's logs pipeline still exports to `nop` (`deploy/aws/k8s/infra/telemetry.yaml`), so nothing
@@ -666,7 +688,12 @@ the product must prove its capabilities:
 - bucket backups: versioning on for bronze, silver and gold, noncurrent versions kept 7 days, and Postgres's WAL
   archived to its own bucket (§11.4 L4, built 2026-11-24, not yet applied on AWS); bronze is still the only copy
   of a landed object once its versions expire, so a longer window, or a copy in a second region, is the
-  operator's choice;
+  operator's choice. Once applied, the buckets' versioning can only be suspended, never removed;
+- the backups' protection: the archiver's role (`sdh-poc-postgres-backup`) may overwrite base backups (only WAL is
+  written once, by the sidecar's own `If-None-Match`), its credentials reach every container in Postgres's pod,
+  and the deployer may delete any version or change the lifecycle (`s3:*` on `sdh-poc-*`). No Object Lock, no
+  second account or region. Acceptable for synthetic data; HIPAA-OPERATIONS.md §7, "Protecting the backups",
+  is what real PHI needs;
 - KMS rotation, which is off.
 
 ## 9. Sources, and what could not be checked

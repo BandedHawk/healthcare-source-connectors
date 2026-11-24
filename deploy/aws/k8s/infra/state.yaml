@@ -63,6 +63,11 @@ spec:
 # segment archived but not yet sent outlasts a restart; a segment is sent once (if-none-match), never replaced.
 # archive_timeout closes a segment at least every minute, so a restore loses at most about a minute.
 #
+# The volume holds the database, its WAL and the outbox, so if the shipper can't send, the outbox grows. The
+# sidecar capacity-guard makes Postgres read-only below 10% free, before the volume fills (a full volume stops
+# Postgres outright), and lifts its hold at 20%; the shipper warns when anything waits over 10 minutes; and
+# poc.sh up refuses to start without the backup role, the likeliest cause (docs/AWS-POC.md §8.1).
+#
 # TLS (HIPAA.md §11.4, L5): the server certificate is in the secret postgres-tls, which poc.sh issues from its CA
 # (state directory, pki/). pg_hba.conf is the ConfigMap postgres-hba: the reference pipeline's database (the
 # harness's, sdh_harness, deploy/reference/postgres.sql) and its roles over TLS only; the performance pipeline
@@ -108,6 +113,7 @@ data:
     set -u
     shopt -s globstar nullglob
     outbox=/var/lib/postgresql/backup/outbox
+    round=0
     while true; do
       for f in "$outbox"/**/*; do
         [[ -f "$f" ]] || continue
@@ -131,7 +137,54 @@ data:
         fi
       done
       for d in "$outbox"/base/*/; do rmdir "$d" 2>/dev/null; done
+      # Once a minute, a warning while anything has waited over 10 minutes: the outbox is on Postgres's volume.
+      if (( ++round % 6 == 0 )); then
+        for f in "$outbox"/**/*; do
+          [[ -f "$f" ]] || continue
+          if (( $(date +%s) - $(stat -c %Y "$f") > 600 )); then
+            echo "wal-shipper: WARNING: ${f#"$outbox"/} has waited over 10 minutes to be sent; the outbox is on" \
+              "Postgres's volume (capacity-guard holds writes below 10% free)" >&2
+          fi
+          break
+        done
+      fi
       sleep 10
+    done
+  guard.sh: |
+    #!/bin/bash
+    # The capacity guard (docs/AWS-POC.md §8.1): every 30 s, the data volume's free space. Below HOLD_PERCENT free,
+    # Postgres is made read-only (default_transaction_read_only, for every new transaction), so the WAL stops
+    # growing before the volume fills: the stages' writes fail and are retried later, as in a database outage, and
+    # nothing is lost. At RELEASE_PERCENT free or more, a hold this guard made is lifted. Below WARN_PERCENT, a
+    # warning a minute. The hold is kept across restarts (ALTER SYSTEM, and the mark file on the volume).
+    set -u
+    home=/var/lib/postgresql
+    mark="$home/backup/capacity-hold"
+    sql() {
+      PGOPTIONS="-c default_transaction_read_only=off" psql -qAt -U postgres -d postgres -v ON_ERROR_STOP=1 -c "$1"
+    }
+    round=0
+    while true; do
+      read -r size avail < <(df --output=size,avail -B1 "$home" | tail -n 1)
+      free=$(( avail * 100 / size ))
+      if [[ ! -e "$mark" ]] && (( free < HOLD_PERCENT )); then
+        if sql "ALTER SYSTEM SET default_transaction_read_only = on" >/dev/null \
+            && sql "SELECT pg_reload_conf()" >/dev/null; then
+          mkdir -p "$home/backup"
+          date -u +%FT%TZ > "$mark"
+          echo "capacity-guard: HOLD: ${free}% of Postgres's volume free (under ${HOLD_PERCENT}%): read-only until" \
+            "${RELEASE_PERCENT}% is free" >&2
+        fi
+      elif [[ -e "$mark" ]] && (( free >= RELEASE_PERCENT )); then
+        if sql "ALTER SYSTEM RESET default_transaction_read_only" >/dev/null \
+            && sql "SELECT pg_reload_conf()" >/dev/null; then
+          rm -f "$mark"
+          echo "capacity-guard: released: ${free}% of Postgres's volume free" >&2
+        fi
+      elif (( free < WARN_PERCENT && ++round % 2 == 0 )); then
+        echo "capacity-guard: WARNING: ${free}% of Postgres's volume free$([[ -e "$mark" ]] && echo "; held")" >&2
+      fi
+      sleep 30
     done
 ---
 apiVersion: v1
@@ -199,6 +252,25 @@ spec:
             - { name: run, mountPath: /var/run/postgresql }
             - { name: hba, mountPath: /etc/postgresql/hba, readOnly: true }
             - { name: tls, mountPath: /etc/postgresql/tls, readOnly: true }
+            - { name: archive, mountPath: /etc/postgresql/archive, readOnly: true }
+        # Holds writes before the volume fills (guard.sh): the WAL, the outbox and the database share it.
+        - name: capacity-guard
+          image: postgres:18.4
+          command: [/bin/bash, /etc/postgresql/archive/guard.sh]
+          env:
+            - { name: WARN_PERCENT, value: "25" }
+            - { name: HOLD_PERCENT, value: "10" }
+            - { name: RELEASE_PERCENT, value: "20" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql }
+            - { name: run, mountPath: /var/run/postgresql }
             - { name: archive, mountPath: /etc/postgresql/archive, readOnly: true }
         # Sends the outbox (WAL segments, base backups) to the backup bucket, one object each, then deletes it.
         - name: wal-shipper

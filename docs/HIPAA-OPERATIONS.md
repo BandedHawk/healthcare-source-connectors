@@ -112,6 +112,30 @@ profile checks the settings; the platform administrator also confirms:
 - object store versioning on bronze at least, and the buckets refusing plaintext requests;
 - CloudTrail (or the provider's equivalent) data events on the buckets and KMS keys, to the SIEM.
 
+#### Securing the broker
+
+ACLs bind only the principals they name. A listener whose principal is a super user, such as a plaintext listener
+when `User:ANONYMOUS` is in `super.users`, lets anyone who reaches it read and write every pipeline's topics, and
+change the ACLs. The product's broker tests run a broker that takes clients over `SASL_SSL` only (HIPAA.md §8.1,
+item 7). Before real PHI:
+- **No plaintext listener** for clients. Remove it, rather than relying on the network to keep clients from it.
+- **The controller and broker-to-broker listeners over TLS** too, each with a principal of its own: a client
+  certificate (`SSL` with `ssl.client.auth=required`) or SCRAM.
+- **`super.users` names only those principals,** and a named administrator kept for break-glass, never
+  `User:ANONYMOUS` or a stage's principal. Set `allow.everyone.if.no.acl.found=false`.
+- **Each stage's principal has only the rights `deploy/reference/kafka-acls.sh` grants,** one per stage and
+  pipeline, with passwords or keys from the secret store.
+- **Only the pipeline's namespaces reach the broker** (a network policy, or security groups), and the admin
+  tools are run by the broker team only.
+- **ACL and user changes are audited:** the broker's authorizer log (`kafka.authorizer.logger`) to the SIEM, and
+  reviewed with the daily checks (§3.1).
+- **On a managed broker** (AWS MSK, Confluent Cloud): unauthenticated access off, client authentication (IAM,
+  SCRAM or mTLS) with TLS only, and the provider's own ACLs or policies.
+
+If a plaintext listener must stay for a while, as on a shared broker being moved over, give its principal no
+rights on any pipeline's topics (no super user), keep it on a network no stage's namespace shares, and record it as
+a risk in the risk analysis until it is removed.
+
 ### 2.7 A separate store for audit events
 
 The journal (§2.2) is durable, but it sits in the same Postgres as the pipeline's own state. NIST SP 800-66r2
@@ -503,6 +527,46 @@ check after it.
 Not backed up: Kafka's messages, which the stages rebuild from the tables. Iceberg snapshots are not a backup: they
 expire after `snapshot-retention` (24 h), in the same bucket.
 
+**Versioning, once on, can't be fully turned off on S3:** a bucket can only be suspended. Its versions are kept,
+and from then on an overwrite or a delete replaces the single "null" version, so nothing written later can be
+restored. Object Lock needs versioning on for good. GCS and Azure Blob versioning can be turned off, and keep the
+versions already made. Plan the noncurrent-version lifecycle rule before you turn it on: until a rule removes
+them, every version deleted or overwritten is stored, and paid for, at the bucket's usual price. A pipeline's
+maintenance deletes files every day (compaction, snapshot expiry), so noncurrent versions grow with the load,
+not only with what was landed.
+
+### Protecting the backups
+
+The backups are a second copy of the PHI and of what protects it: the object store's versions hold every
+encrypted object, and the database's backups hold the catalog, the registries, the audit journal and the
+operators' sealing keys. They are only as safe as the identities that can change them. **The gap:** the product
+neither makes the backups nor can check who may change them. Out of the box, two exposures are likely:
+- **The database's backup identity can usually overwrite what it wrote.** A WAL archiver or backup agent needs to
+  write; if the same identity may overwrite or delete, an attacker holding it (or a fault in it) can destroy the
+  restore points without anyone deleting the database. Where the archiver runs beside the database (a sidecar in
+  the database's pod, for instance), every container in that pod usually gets its credentials too.
+- **Administrators can delete versions.** Versioning protects against the stages' mistakes and an operator's
+  delete, not against an identity allowed `s3:DeleteObjectVersion`, `s3:PutBucketVersioning` or
+  `s3:PutLifecycleConfiguration`: such an identity can remove every version at once, or suspend versioning.
+
+To close or narrow them:
+- **Write once.** Turn on S3 Object Lock in compliance mode (or GCS bucket retention with a locked policy, or
+  Azure immutable storage) on the buckets and the backup store, with a retention at least the recovery window.
+  Iceberg's deletes still work, as delete markers; no one can remove a version early, an administrator included.
+  At the least, deny overwrites of backup files: a bucket policy that refuses `s3:PutObject` without
+  `If-None-Match`, or a versioned backup bucket.
+- **Backups out of reach of the production identities:** a backup vault or bucket in another account (AWS Backup
+  with Vault Lock, or replication to a bucket the production account can't change), and another region for a
+  region's loss.
+- **Least privilege:** the database's backup identity may write new backups and read them, never delete them; no
+  stage, operator or deployer role in production has `DeleteObjectVersion`, `PutBucketVersioning` or
+  `PutLifecycleConfiguration` on the pipeline's buckets. Keep those for a break-glass role, used with a ticket.
+- **MFA delete** on the versioned buckets (S3), where Object Lock isn't used.
+- **Alerts** on `PutBucketVersioning`, `PutBucketLifecycleConfiguration`, `DeleteObjectVersion`,
+  `PutBucketPolicy` and `PutObjectLockConfiguration` (CloudTrail management and data events, to the SIEM), and on a
+  backup that didn't arrive (§7.2).
+- **A restore test** proves the backups (below); record in the risk analysis which of these are in place.
+
 ### Restoring the database to an earlier point
 
 For a corrupt or deleted database, a bad migration, or rows changed in error. **The object store is not rolled
@@ -625,6 +689,37 @@ the resume. Otherwise the stage grows to its maximum pods, all idle.
 
 Each pause and resume is audited (`sdh.audit.control.pause`, `.resume`, or `sdh.audit.admin.*` from the CLI),
 with who and the reason, and each pod records when it paused and resumed (`stage.paused`, `stage.resumed`).
+
+### 7.2 Watching the database's capacity (§ 164.308(a)(7)(ii)(B), § 164.312(c)(1))
+
+A database whose storage fills stops taking writes: Postgres stops when it can't write its WAL. The stages then
+fail and retry, as in a database outage. Nothing landed is lost, but nothing moves until there is room again, and
+the audit journal waits too. The product doesn't watch the database's storage: that is the platform team's.
+WAL archiving makes it likelier: if the archive can't be written, Postgres keeps every segment until it can, and
+they fill the same storage.
+
+Monitor, and alert on:
+
+| What | Where | Alert |
+|---|---|---|
+| Free storage | The volume's free bytes (the node exporter or kubelet volume stats); RDS `FreeStorageSpace`; Cloud SQL `disk/utilization`; Azure `storage_percent` | Warn at 25% free, page at 10%, and on a fall that would fill it within a day |
+| WAL kept back | `pg_wal`'s size (`pg_ls_waldir()`), and WAL kept for replication slots (`pg_replication_slots`) | More than a few times `max_wal_size` |
+| The archive | `pg_stat_archiver`: `failed_count` rising, `last_failed_time`, and `last_archived_time` older than `archive_timeout` plus a few minutes | Any failure that lasts; no archive for 15 minutes while the pipeline runs |
+| Base backups | The newest base backup's time, in the backup store | Older than your schedule allows |
+| Growth | Each pipeline database's size (`pg_database_size`) over weeks: registries and the journal grow with every item until retention trims them (§8) | Its forecast, to size the storage ahead |
+
+Then:
+- **Leave room:** size the storage for the database, plus the WAL a day's archive outage would keep, plus a
+  base backup if it is made on the same storage. Turn on storage autoscaling on a managed database (RDS storage
+  autoscaling, Cloud SQL automatic storage increase, Azure storage autogrow), with a ceiling.
+- **Hold writes before it fills,** if you can: making the database read-only (`default_transaction_read_only`)
+  below a threshold stops the WAL growing, and the stages wait as in an outage; it is easier to recover from than
+  a full volume. The AWS PoC does this with a sidecar (AWS-POC.md §8.1); on a managed database, autoscaling and the
+  alerts above take its place.
+- **When it alerts:** find what is taking the space (an archive that can't be written, a replication slot no one
+  reads, a base backup left behind, or growth), fix that, and only then add storage. Don't delete WAL by hand:
+  segments not yet archived are restore points lost.
+- **Review** the capacity with the weekly checks (§3), and record each review.
 
 ## 8. Retention, disposal and end of contract (§ 164.310(d), § 164.504(e)(2)(ii)(J))
 

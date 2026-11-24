@@ -242,6 +242,7 @@ cmd_up() {
   setup_keda
   setup_topics
   setup_database
+  db_capacity
   db_backup
   if [[ -x "$K8S/pipeline/apply.sh" ]]; then
     "$K8S/pipeline/apply.sh"
@@ -253,7 +254,37 @@ cmd_up() {
   cmd_status
 }
 
+# backups_ready: the backup bucket and the role its sidecar sends with, both from the persistent layer. Without
+# them the WAL outbox can only grow, on Postgres's volume, until the capacity guard holds every write
+# (docs/AWS-POC.md §8.1), so up refuses to start Postgres.
+backups_ready() {
+  [[ "$(tf persistent output -json | python3 -I -c 'import json,sys; print("backup_role_arn" in json.load(sys.stdin))')" \
+      == True ]] \
+    || die "the persistent layer has no backup role yet: run poc.sh bootstrap first (docs/AWS-POC.md §8.1)"
+  aws s3api head-bucket --bucket "$BACKUP_BUCKET" >/dev/null 2>&1 \
+    || die "no backup bucket $BACKUP_BUCKET: run poc.sh bootstrap first (docs/AWS-POC.md §8.1)"
+}
+
+# db_capacity: Postgres's volume (free, of size), the outbox's backlog, the archiver's last failure, and whether the
+# capacity guard holds writes. For status, and checked at up.
+db_capacity() {
+  infra get pod postgres-0 >/dev/null 2>&1 || { say "postgres: not running"; return 0; }
+  local line free size outbox failed
+  line="$(pg df --output=avail,size -B1M "$PG_HOME" 2>/dev/null | tail -n 1)" || { say "postgres: volume unread"; return 0; }
+  read -r free size <<<"$line"
+  outbox="$(pg du -sm "$PG_HOME/backup/outbox" 2>/dev/null | cut -f1)"
+  failed="$(pg_sql "SELECT coalesce(to_char(last_failed_time, 'YYYY-MM-DD HH24:MI:SS TZ'), 'never')
+                    FROM pg_stat_archiver" 2>/dev/null || echo unknown)"
+  say "postgres volume: $free MiB free of $size ($(( free * 100 / size ))%), outbox ${outbox:-0} MiB, archive last failed: $failed"
+  if pg test -e "$PG_HOME/backup/capacity-hold" 2>/dev/null; then
+    say "WARNING: the capacity guard holds Postgres read-only (under 10% free; lifted at 20%): free space first"
+  elif (( free * 100 / size < 25 )); then
+    say "WARNING: under 25% of Postgres's volume is free (the guard holds writes under 10%)"
+  fi
+}
+
 start_services() {
+  backups_ready
   say "Postgres and Kafka on the kept volumes"
   export POSTGRES_VOLUME_ID KAFKA_VOLUME_ID STATE_ZONE
   POSTGRES_VOLUME_ID="$(volume_id postgres)"
@@ -960,6 +991,8 @@ cmd_status() {
         [[ -n "$g" ]] && say "  node group $g: $(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$g" \
           --query 'nodegroup.[status,scalingConfig.desiredSize]' --output text)"
       done
+    aws eks update-kubeconfig --name "$CLUSTER" --alias "$CLUSTER" --kubeconfig "$KUBECONFIG" >/dev/null 2>&1 \
+      && db_capacity
   else
     say "cluster $CLUSTER: none (down)"
   fi
