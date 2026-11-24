@@ -514,7 +514,9 @@ the time T restored to; every step below is audited under it.
 2. **Restore the database to T,** as a new instance, and point the stages' settings at it. If the catalog is in a
    database apart from the registries, restore both to the same T: the check can't tell a catalog newer than its
    registries.
-3. **Check that versioning is still on** for every bucket of the pipeline, and leave the store as it is.
+3. **Check that versioning is still on** for every bucket of the pipeline, and its noncurrent versions kept, and
+   leave the store as it is. Under the hipaa profile a stage won't start on a bucket without versioning
+   (`store-versioning`); the lifecycle rule is yours to check.
 4. **Restart the control APIs** on the restored database, then, on each stage, with `data.admin`:
 
    ```

@@ -20,6 +20,8 @@
   <properties>
     <!-- All scenarios unless named: -Dsdh.harness.scenarios=access,support -->
     <sdh.harness.scenarios></sdh.harness.scenarios>
+    <!-- The Testcontainers target's Kafka login: scram (SASL_SSL) or certificate (mutual TLS) -->
+    <sdh.harness.kafka-login>scram</sdh.harness.kafka-login>
   </properties>
 
   <dependencyManagement>
@@ -112,6 +114,7 @@
           <systemPropertyVariables>
             <sdh.harness.root>${maven.multiModuleProjectDirectory}</sdh.harness.root>
             <sdh.harness.scenarios>${sdh.harness.scenarios}</sdh.harness.scenarios>
+            <sdh.harness.kafka-login>${sdh.harness.kafka-login}</sdh.harness.kafka-login>
           </systemPropertyVariables>
         </configuration>
       </plugin>

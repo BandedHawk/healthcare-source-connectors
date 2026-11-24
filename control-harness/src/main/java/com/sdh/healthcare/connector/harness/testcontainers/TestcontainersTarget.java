@@ -128,12 +128,25 @@ public final class TestcontainersTarget implements Target
     private int backups;
 
     /**
-     * Starts the services and the pipeline.
+     * Starts the services and the pipeline, the stages logging in to
+     * Kafka with SCRAM.
      *
      * @param root the repository's root, with the stages built
      * @throws Exception if something can't start
      */
     public TestcontainersTarget(Path root) throws Exception
+    {
+        this(root, KafkaLogin.SCRAM);
+    }
+
+    /**
+     * Starts the services and the pipeline.
+     *
+     * @param root  the repository's root, with the stages built
+     * @param login how the stages log in to Kafka
+     * @throws Exception if something can't start
+     */
+    public TestcontainersTarget(Path root, KafkaLogin login) throws Exception
     {
         this.root = root;
         work = root.resolve("control-harness").resolve("target")
@@ -144,11 +157,13 @@ public final class TestcontainersTarget implements Target
         issuer = new TestIssuer();
         trust = pki.context(null);
         producer = pki.context(pki.client(PRODUCER));
-        Harness.say("Starting the services (Postgres, Kafka, SeaweedFS,"
-                + " Vault, the collector)");
+        Harness.say("Starting the services (Postgres, Kafka with "
+                + (login == KafkaLogin.SCRAM ? "SCRAM logins"
+                        : "client certificates")
+                + ", SeaweedFS, Vault, the collector)");
         services = new Services(pki, List.of(LANDING, SPLIT, CONVERT),
                 List.of(topic("landed"), topic("split"), topic("records"),
-                        topic("convert.dlq")));
+                        topic("convert.dlq")), login);
         secrets.add(services.postgresPassword);
         secrets.add(services.s3Secret);
         secrets.add(services.vaultToken);
@@ -458,8 +473,8 @@ public final class TestcontainersTarget implements Target
         }
         Harness.say("Starting " + name);
         StageProcess process = new StageProcess(name, StageProcess.jar(root,
-                MODULES.get(stage)), control, each, Map.of(
-                        Services.JAAS_ENV, services.jaas(stage)),
+                MODULES.get(stage)), control, each,
+                services.kafkaEnvironment(stage),
                 work.resolve("logs")
                         .resolve(name + ".log"));
         processes.put(name, process);

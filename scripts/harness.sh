@@ -2,6 +2,8 @@
 # The control API's test harness (docs/CONTROL-API-DESIGN.md §14): one set of scenarios, run against a target.
 #
 #   scripts/harness.sh testcontainers [scenario,...]   # the pipeline on Testcontainers in the sdh-it VM (H1)
+#   SDH_HARNESS_KAFKA_LOGIN=certificate scripts/harness.sh testcontainers   # the stages log in to Kafka with
+#                                                      # client certificates (mutual TLS) instead of SCRAM
 #   scripts/harness.sh sandbox [scenario,...]          # the minikube sandbox's harness pipeline (H2)
 #   scripts/harness.sh aws [scenario,...]              # the AWS PoC stack's harness pipeline (H3)
 #
@@ -38,7 +40,7 @@ case "$target" in
     SDH_IT_STOP="${SDH_IT_STOP:-1}" "$ROOT/scripts/it-minikube.sh" -o -pl control-harness \
       -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false \
       -Dit.test=HarnessIT -Dfailsafe.failIfNoSpecifiedTests=false \
-      "-Dsdh.harness.scenarios=$scenarios"
+      "-Dsdh.harness.scenarios=$scenarios" "-Dsdh.harness.kafka-login=${SDH_HARNESS_KAFKA_LOGIN:-scram}"
     ;;
   sandbox)
     # shellcheck source=minikube-home.sh

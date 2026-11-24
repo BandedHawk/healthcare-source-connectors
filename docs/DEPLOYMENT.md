@@ -142,17 +142,26 @@ neither slows nor is slowed by another in the code, but its numbers can't be rea
 Tested, and in the reference settings (`deploy/reference/`): Kafka over `SASL_SSL` with per-stage ACLs, and
 Postgres with TLS (`verify-full`) direct to the server (HIPAA.md §8.1 items 7 and 13).
 
+Tested, not in the reference settings: **Kafka with client certificates (mutual TLS)** instead of SASL, by every
+scenario of the control harness on Testcontainers (`SDH_HARNESS_KAFKA_LOGIN=certificate scripts/harness.sh
+testcontainers`, 2026-11-24). Each stage has its own certificate, and its Kafka URIs say `securityProtocol=SSL`,
+`sslKeystoreType=PKCS12`, `sslKeystoreLocation=<its key store>` and `sslKeystorePassword` and `sslKeyPassword` as
+placeholders (`RAW({{env:SDH_KAFKA_KEYSTORE_PASSWORD}})`: a stage refuses a password written into a URI), beside
+the broker's CA as with SASL. The broker's client listener sets `ssl.client.auth=required`, and
+`ssl.principal.mapping.rules=RULE:^CN=([^,]+),.*$/$1/,DEFAULT` so that a certificate's CN is the Kafka user: the
+same users, and the rights below, as with SCRAM. The ACLs themselves were tested with SCRAM (`KafkaSecurityIT`);
+the harness's stage users are super users.
+
 **Supported or expected, but not yet tested,** and planned for later iterations, as the product is prepared for
 deployment in each environment (HIPAA.md §11.1, P11):
-- **Kafka with client certificates (mTLS)** instead of SASL;
 - **AWS MSK with its IAM login;**
 - **Postgres TLS through PgBouncer** (the PoC runs PgBouncer, in plaintext). This may be tested sooner than the
   rest, but only after performance has been reviewed further (PERFORMANCE.md §10, runs 60 to 63);
 - **GCP Cloud KMS** against the real service (its client is built and tested against a stand-in only);
 - **AWS GovCloud and Azure Government** endpoints.
 
-Until each is tested, a customer using it tests it in their own environment first, with synthetic data. Kafka mTLS
-and Postgres TLS through PgBouncer are planned with the other infrastructure tests (HIPAA.md §11.4).
+Until each is tested, a customer using it tests it in their own environment first, with synthetic data. Postgres
+TLS through PgBouncer is planned with the other infrastructure tests (HIPAA.md §11.4).
 
 ## Audit events: the collector
 
@@ -251,7 +260,13 @@ point-in-time window. A restore of the database to an earlier point (HIPAA-OPERA
 references files the stages' maintenance has deleted since, and its repair brings them back from their last
 versions; without them it stops. Bronze matters most: once an item has landed, it is the only copy. The repair
 brings files back on S3 (and S3-compatible stores with versioning) only; on GCS or Azure Blob it names each missing
-file for the store's own tools. Not yet checked by the hipaa profile: check it when you deploy, and at each restore
+file for the store's own tools.
+
+The hipaa profile checks it: each stage asks the store, as it opens each table, whether its bucket keeps versions,
+and refuses to start if it doesn't, or if the store won't say (`store-versioning`, DESIGN.md §7.6). On S3 each
+stage's role needs `s3:GetBucketVersioning` on its buckets; on GCS, `storage.buckets.get`. Azure's versioning is a
+setting of the storage account, which a stage can't read: check it yourself and waive the check with that reason.
+The check doesn't see the lifecycle rule for noncurrent versions: check that when you deploy, and at each restore
 test.
 
 An erasure (`erase`, `purge`) deletes the current objects; their noncurrent versions stay until the lifecycle rule

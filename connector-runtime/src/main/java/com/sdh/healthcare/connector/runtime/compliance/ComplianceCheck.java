@@ -77,6 +77,17 @@ public enum ComplianceCheck
      */
     STORAGE_NO_AUTH("storage-no-auth",
             "object storage without authentication"),
+    /**
+     * A table in an object store without versioning on, or whose
+     * versioning can't be read (Azure, a store that doesn't say, or no
+     * right to ask): a deleted or overwritten object couldn't be brought
+     * back after a restore (design §18.8; 45 CFR 164.308(a)(7)(ii)(A)).
+     * Found when the table is opened, by asking the store, not from the
+     * settings.
+     */
+    STORE_VERSIONING("store-versioning",
+            "an object store without versioning, or whose versioning"
+            + " can't be read"),
 
     /**
      * A JVM that may write memory, and so PHI, to disk or let a tool read

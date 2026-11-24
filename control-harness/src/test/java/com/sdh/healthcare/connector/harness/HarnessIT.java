@@ -11,6 +11,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.sdh.healthcare.connector.harness.aws.AwsTarget;
 import com.sdh.healthcare.connector.harness.sandbox.SandboxTarget;
 import com.sdh.healthcare.connector.harness.scenario.Scenarios;
+import com.sdh.healthcare.connector.harness.testcontainers.KafkaLogin;
 import com.sdh.healthcare.connector.harness.testcontainers.TestcontainersTarget;
 import java.nio.file.Path;
 import java.util.List;
@@ -21,8 +22,11 @@ import org.junit.jupiter.api.Test;
  * {@code sdh.harness.scenarios} names, against the target {@code
  * sdh.harness.target} names: {@code testcontainers} (the default), the
  * pipeline on Testcontainers, {@code sandbox}, the sandbox's harness
- * pipeline, or {@code aws}, the AWS PoC's. Run by {@code
- * scripts/harness.sh}, which builds or deploys the target first.
+ * pipeline, or {@code aws}, the AWS PoC's. On Testcontainers, {@code
+ * sdh.harness.kafka-login} chooses how the stages log in to Kafka
+ * ({@link KafkaLogin}: {@code scram}, the default, or {@code
+ * certificate}). Run by {@code scripts/harness.sh}, which builds or
+ * deploys the target first.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -68,7 +72,9 @@ class HarnessIT
                 "testcontainers");
         return switch (name)
         {
-            case "testcontainers" -> new TestcontainersTarget(root);
+            case "testcontainers" -> new TestcontainersTarget(root,
+                    KafkaLogin.parse(System.getProperty(
+                            "sdh.harness.kafka-login")));
             case "sandbox" -> new SandboxTarget(Path.of(System.getProperty(
                     "sdh.harness.state")), System.getProperty(
                             "sdh.harness.profile", "sdh-demo"));

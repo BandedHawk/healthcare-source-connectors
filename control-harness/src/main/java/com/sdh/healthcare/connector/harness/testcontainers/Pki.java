@@ -335,11 +335,25 @@ final class Pki
      */
     Path write(String name, String content) throws Exception
     {
+        return write(name, content.getBytes(
+                java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Writes a file only its owner may read, under the run's key directory.
+     *
+     * @param name    its name
+     * @param content its content
+     * @return the file
+     * @throws Exception if it can't be written
+     */
+    Path write(String name, byte[] content) throws Exception
+    {
         Path file = directory.resolve(name);
         Files.deleteIfExists(file);
         Files.createFile(file, PosixFilePermissions.asFileAttribute(
                 PosixFilePermissions.fromString("rw-------")));
-        return Files.writeString(file, content);
+        return Files.write(file, content);
     }
 
     /**

@@ -7,8 +7,11 @@
 package com.sdh.healthcare.connector.core.storage;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.apache.iceberg.CatalogProperties;
@@ -65,5 +68,39 @@ class IngestTablesTest
         int schemaId = table.schema().schemaId();
         assertThat(IngestTables.records(catalog, "sdh_ingest").schema()
                 .schemaId()).isEqualTo(schemaId);
+    }
+
+    /**
+     * The listener is told of each table as it is created or loaded, and a
+     * refusal from it reaches the caller.
+     */
+    @Test
+    void theListenerIsToldOfEachTableAndMayRefuseIt()
+    {
+        InMemoryCatalog catalog = new InMemoryCatalog();
+        catalog.initialize("prod", Map.of(CatalogProperties.WAREHOUSE_LOCATION,
+                "memory://wh-" + UUID.randomUUID()));
+        List<String> told = new ArrayList<>();
+        try
+        {
+            IngestTables.whenOpened(table -> told.add(table.name()));
+            IngestTables.records(catalog, "sdh_ingest");
+            IngestTables.records(catalog, "sdh_ingest");
+            assertThat(told).containsExactly("prod.sdh_ingest.records",
+                    "prod.sdh_ingest.records");
+
+            IngestTables.whenOpened(table ->
+            {
+                throw new IllegalStateException("refused");
+            });
+            assertThatThrownBy(() -> IngestTables.records(catalog,
+                    "sdh_ingest")).hasMessage("refused");
+        }
+        finally
+        {
+            IngestTables.whenOpened(table ->
+            {
+            });
+        }
     }
 }

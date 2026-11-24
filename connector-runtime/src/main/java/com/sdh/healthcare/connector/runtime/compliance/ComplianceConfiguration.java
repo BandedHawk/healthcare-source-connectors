@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.runtime.compliance;
 
+import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
@@ -17,8 +18,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import org.apache.iceberg.Table;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.SmartInitializingSingleton;
@@ -46,6 +49,11 @@ import org.springframework.core.env.Environment;
  * these reach the console only. Once the node has started, the profile,
  * each waiver and its reason, or that the profile is off, are audited
  * through the exporter as well.
+ *
+ * <p>One check needs the store, not the settings: once the profile has
+ * passed, each table is checked as it is opened, for a store that keeps
+ * versions ({@link ComplianceCheck#STORE_VERSIONING}), and a refusal stops
+ * whatever opened it.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -267,9 +275,11 @@ public class ComplianceConfiguration
         public void postProcessBeanFactory(
                 ConfigurableListableBeanFactory beanFactory)
         {
+            Map<String, String> settings = settings(environment);
             ComplianceRules.Outcome outcome = ComplianceRules.evaluate(
-                    settings(environment), jvmOption);
+                    settings, jvmOption);
             last = outcome;
+            IngestTables.whenOpened(storeGuard(outcome.profile(), settings));
             if (!outcome.passed())
             {
                 Telemetry telemetry = Telemetry.get();
@@ -299,6 +309,29 @@ public class ComplianceConfiguration
                                         .collect(Collectors.joining(", "))
                                         + ")");
             }
+        }
+
+        /**
+         * What checks each table's store as it is opened: nothing with the
+         * profile off.
+         *
+         * @param profile  the profile in force
+         * @param settings the settings, for the check's waiver
+         * @return the check
+         */
+        static Consumer<Table> storeGuard(ComplianceProfile profile,
+                Map<String, String> settings)
+        {
+            if (profile == ComplianceProfile.NONE)
+            {
+                return table ->
+                {
+                };
+            }
+            return new StoreVersioningGuard(profile,
+                    ComplianceRules.waivers(settings)
+                            .get(ComplianceCheck.STORE_VERSIONING),
+                    StoreVersioning::of);
         }
 
         /**

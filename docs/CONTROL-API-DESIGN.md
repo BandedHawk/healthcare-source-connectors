@@ -408,7 +408,7 @@ depends on neither of the others.
 
   | Target | Starts or reaches | Injects faults by |
   |---|---|---|
-  | `TestcontainersTarget` | Kafka (SASL_SSL), Postgres (TLS), SeaweedFS, Vault, the test issuer, and each stage in worker and control modes (from its jar, as built: §15.10) | pausing containers |
+  | `TestcontainersTarget` | Kafka (SASL_SSL with SCRAM, or SSL with client certificates), Postgres (TLS), SeaweedFS, Vault, the test issuer, and each stage in worker and control modes (from its jar, as built: §15.10) | pausing containers |
   | `SandboxTarget` | the sandbox's harness pipeline: the customer images, each stage's Deployment and control Deployment from its README, through port-forwards (§15.11) | pausing a service's containers on their node, deleting a stage's pods gracefully or by force |
   | `AwsTarget` | the PoC stack's harness pipeline: the same Deployments, on EKS with S3, KMS and Pod Identity, through port-forwards (§15.12) | scaling PgBouncer or Kafka to nothing, a network policy keeping a stage from S3 or KMS, deleting a stage's pods gracefully or by force |
 
@@ -960,10 +960,11 @@ depends on neither of the others.
   `/audit/verify` finds nothing changed. After a scenario fails it resumes every stage, so the next starts from a
   running pipeline. Roles are named after the permissions.
 - **The Testcontainers target** (`TestcontainersTarget`): its own CA (`Pki`); Postgres with TLS (verify-full,
-  SCRAM), Kafka on SASL_SSL with SCRAM-SHA-512 users, SeaweedFS's S3, Vault (transit KEKs and ECDSA signing keys)
-  and the collector (`Services`); then the landing (HTTP push over mTLS), split and convert stages, each as a worker
-  and as `java -jar <stage>.jar control`, settings in `SPRING_APPLICATION_JSON`, the Kafka login in the process's
-  environment (`{{env:SDH_KAFKA_JAAS}}`), output in `control-harness/target/harness/<time>/logs`. Faults pause a
+  SCRAM), Kafka on TLS with a user per stage, SeaweedFS's S3, Vault (transit KEKs and ECDSA signing keys) and the
+  collector (`Services`). Kafka's login is SCRAM-SHA-512 over SASL_SSL, or with `sdh.harness.kafka-login=certificate`
+  a client certificate per stage over SSL (mutual TLS, HIPAA.md §11.4 L1); then the landing (HTTP push over mTLS), split and convert stages, each as a worker and as
+  `java -jar <stage>.jar control`, settings in `SPRING_APPLICATION_JSON`, the Kafka secret in the process's
+  environment, output in `control-harness/target/harness/<time>/logs`. Faults pause a
   service's container.
 - **Scenarios** (`Scenarios.all()`, in order; erasure last, as nothing runs after it):
   - `support`: health reaches every dependency; settings redact; the bundle has every part and no secret of the

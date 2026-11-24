@@ -556,8 +556,8 @@ The outstanding work is restated, with what's decided since, in §11.
       `restore-release` on each stage bring back deleted files from the store's versions (S3 only), bring the
       landing node forward so nothing landed is lost, keep the files done since, and make the purges and erasures
       since again from a control log kept in the store. The procedure is HIPAA-OPERATIONS.md §7 (D8).
-    - Not built: the compliance check that versioning is on, and the store-damaged walk that opens each object
-      (`--deep`).
+    - The hipaa profile refuses to start a stage whose buckets don't keep versions, asking the store (built
+      2026-11-24, DESIGN.md revision (fg)). Not built: the store-damaged walk that opens each object (`--deep`).
 13. **Reference configuration with the profile on: built 2026-11-20** (`deploy/reference/`, DESIGN revision (eh)).
     - Each stage's settings (landing, split, convert, transform), under `hipaa` with nothing waived:
       - Kafka over `SASL_SSL`, with the login from the environment;
@@ -781,7 +781,7 @@ The work still owed before a customer can run the product on real PHI, after the
 | P8 | **FIPS mode:** tested under a FIPS 140-3 validated provider | §8.1 item 5; federal buyers (§8.4) | The JOSE library, HKDF, the AWS SDK and the Iceberg clients are untested under it. |
 | P9 | **Security labels** from the source's confidentiality codes and DS4P markings (`meta.security`) | §8.1 item 10; minimum necessary § 164.514(d); Part 2 | Built (2026-11-24, DESIGN.md revisions (fe), (ff), decided with the user): DS4P R1 at its three levels (document, section, entry Privacy Annotation), a lower level replacing the one above; obligation, refrain and purpose-of-use codes on the resources they apply to; the Bundle's high-water mark in plain on the gold row (`confidentiality`); no label invented where the source has none. DS4P R1 for CDA defines no sensitivity codes. |
 | P10 | **Secrets in output URIs refused,** as they are on input URIs | § 164.312(a)(1) | Built (2026-11-24, DESIGN.md revision (fd)): an option holding a password, key, secret, token, JAAS login or connection string must be a `{{...}}` placeholder or a `#bean` reference on the output, reprocess, dead-letter, results and `sdh.queue.uri` URIs too; a written value stops the node at startup, the message naming the setting and option, never the value (DEPLOYMENT.md, "Broker rights"). |
-| P11 | **Transports still untested:** Kafka with client certificates (mTLS) and with AWS MSK's IAM login; Postgres TLS through PgBouncer; GCP Cloud KMS against the real service; AWS GovCloud and Azure Government endpoints | § 164.312(d), (e); §8.4 | Kafka SASL_SSL and Postgres TLS are tested (§8.1 item 7). Expected in later iterations, as the product is prepared for deployment in each environment; listed for customers in DEPLOYMENT.md, "Transports: what has been tested". Postgres TLS through PgBouncer may come sooner, after performance has been reviewed further (decided 2026-11-22 with the user). Kafka mTLS and PgBouncer TLS are planned in the combined session of §11.4 (L1, L2, A2). |
+| P11 | **Transports still untested:** Kafka with AWS MSK's IAM login; Postgres TLS through PgBouncer; GCP Cloud KMS against the real service; AWS GovCloud and Azure Government endpoints | § 164.312(d), (e); §8.4 | Kafka SASL_SSL and Postgres TLS are tested (§8.1 item 7), and Kafka with client certificates (mutual TLS) by every harness scenario on Testcontainers (2026-11-24, L1, DESIGN.md revision (fh)). Expected in later iterations, as the product is prepared for deployment in each environment; listed for customers in DEPLOYMENT.md, "Transports: what has been tested". Postgres TLS through PgBouncer may come sooner, after performance has been reviewed further (decided 2026-11-22 with the user). PgBouncer TLS is planned in the combined session of §11.4 (L2, A2). |
 | P12 | **A deployment run from `deploy/reference/`,** with TLS everywhere and a database per pipeline, on the sandbox or AWS | §8.1 items 7, 9 and 13, proved end to end | The sandbox and the AWS PoC share one database across pipelines (§8.1 item 9). Planned in the combined session of §11.4 (L5, A1). |
 | P13 | **A penetration test** of a deployment and of the control API, by a third party, and its fixes | The proposed rule (§7); buyers' due diligence | **Conducted by customers,** of their own deployments (decided 2026-11-22 with the user). The product's part is the documentation of what a customer secures before one: HIPAA-OPERATIONS §11 (done 2026-11-22), and the reference documents D1 to D4, D6 and D13 it relies on (§11.2). Any fix a customer's test finds in the product is ours. |
 
@@ -818,7 +818,7 @@ only once the user has approved its cost, with `poc.sh up --long-test "<reason>"
 
 | Step | For | What |
 |---|---|---|
-| L1 | P11 | Kafka with client certificates (mTLS), in the Testcontainers harness beside SASL_SSL |
+| L1 | P11 | Kafka with client certificates (mTLS), in the Testcontainers harness beside SASL_SSL. **Done 2026-11-24:** every scenario passes with either login (DESIGN.md revision (fh)) |
 | L2 | P11 | Postgres TLS through PgBouncer, in the Testcontainers harness. This waits for the further performance review that P11 asks for (PERFORMANCE.md §10) |
 | L3 | P7 | The `restore` scenario at the sandbox level: `SandboxTarget` backs up and restores its Postgres, and its store keeps versions |
 | L4 | P7, P12 | The AWS PoC made ready: WAL archiving to S3 for its Postgres (or pgBackRest) with a recovery target time; versioning on its buckets, with a lifecycle rule for noncurrent versions; `AwsTarget` backs up and restores the database, so the `restore` scenario runs there |

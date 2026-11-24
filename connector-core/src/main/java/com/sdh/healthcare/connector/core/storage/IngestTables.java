@@ -11,6 +11,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.function.Consumer;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SortOrder;
@@ -35,6 +37,11 @@ import org.apache.iceberg.types.Types;
  */
 public final class IngestTables
 {
+
+    /** Told of each table created or loaded; nothing by default. */
+    private static volatile Consumer<Table> opened = table ->
+    {
+    };
 
     /**
      * The largest Parquet row group written, in bytes (design §8.2): 8 MiB.
@@ -276,6 +283,42 @@ public final class IngestTables
      * @return the table
      */
     static Table create(Catalog catalog, String namespace, String name,
+            Schema schema, PartitionSpec spec, SortOrder order,
+            Map<String, String> properties)
+    {
+        Table table = open(catalog, namespace, name, schema, spec, order,
+                properties);
+        opened.accept(table);
+        return table;
+    }
+
+    /**
+     * Sets what is told of each table once it is created or loaded, such
+     * as the compliance profile's probe of its store (design §18.8). It
+     * may refuse the table by throwing, which the caller gets.
+     *
+     * @param listener told of each table; replaces the one before
+     */
+    public static void whenOpened(Consumer<Table> listener)
+    {
+        opened = Objects.requireNonNull(listener, "listener");
+    }
+
+    /**
+     * Creates or loads a table, as {@link #create(Catalog, String, String,
+     * Schema, PartitionSpec, SortOrder, Map)} does, without telling the
+     * listener.
+     *
+     * @param catalog    the Iceberg catalog
+     * @param namespace  the namespace the table is in
+     * @param name       the table's name
+     * @param schema     its columns
+     * @param spec       its partitioning, for a new table
+     * @param order      its sort order, for a new table
+     * @param properties its properties, for a new table
+     * @return the table
+     */
+    private static Table open(Catalog catalog, String namespace, String name,
             Schema schema, PartitionSpec spec, SortOrder order,
             Map<String, String> properties)
     {

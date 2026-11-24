@@ -8,7 +8,7 @@ A starting point for a deployment that holds PHI (HIPAA.md §8.1 item 13). Each 
 | Kafka | `SASL_SSL`: TLS, the broker's CA in `/run/secrets/kafka-ca.crt`, a SCRAM-SHA-512 login per stage from the environment variable `SDH_KAFKA_JAAS` (`RAW({{env:SDH_KAFKA_JAAS}})` in each URI, so the login never sits in a file) | connector-broker `KafkaSecurityIT` |
 | Postgres | `sslmode=verify-full`, the server's CA in `/run/secrets/postgres-ca.crt`; the pipeline's own database | file-connector `PostgresTlsIT`, `PipelineIsolationIT` |
 | Keys | AWS KMS for every KEK and signing key | file-connector `AwsKmsIT` |
-| Object store | S3 through the pod's role, with a bucket policy refusing plaintext requests (AWS-POC.md §4) | file-connector `PipelineIsolationIT` (a bucket set per pipeline) |
+| Object store | S3 through the pod's role, with a bucket policy refusing plaintext requests (AWS-POC.md §4). Versioning on for every bucket: each stage asks, and refuses to start without it, so its role needs `s3:GetBucketVersioning` (DEPLOYMENT.md, "Object store versions") | file-connector `PipelineIsolationIT` (a bucket set per pipeline); `StoreVersioningTest` |
 | Audit export | OTLP to the operator's collector inside the cluster; onward with TLS | HIPAA-OPERATIONS.md §2.7 |
 
 `ReferenceConfigurationTest` (connector-runtime) runs each file through the profile as the node does at startup,
