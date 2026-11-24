@@ -38,7 +38,7 @@ variable "duties_instance_type" {
 # dearest per record; m6g and m6gd are as fast for less.
 variable "burst_instance_types" {
   type    = list(string)
-  default = ["m7g.large", "m6g.large", "m8g.large", "m7gd.large", "m6gd.large"]
+  default = ["m7gd.large", "m7g.large"]
 }
 
 # The burst nodes may be in any of these zones: they hold no volumes. The base nodes stay in var.zones.
@@ -64,7 +64,7 @@ variable "burst_capacity_type" {
 # of 1.6, all of them at the most need about 12.4 vCPU: two base and five burst nodes, one spare.
 variable "burst_max" {
   type    = number
-  default = 6
+  default = 30
 }
 
 # Who may reach the Kubernetes API. poc.sh sets this machine's public address (/32).

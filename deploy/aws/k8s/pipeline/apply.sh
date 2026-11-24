@@ -38,8 +38,10 @@ export SPLIT_RECONCILE_INTERVAL="${SDH_SPLIT_RECONCILE_INTERVAL:-15m}"
 # What the split stage splits (sdh.split.format, and sdh.split.options / sdh.convert.options as JSON-style flow
 # maps): C-CDA, the pipeline's own, unless a load test of another format asks (docs/PERFORMANCE.md §13.2). The
 # transform stage's set reads C-CDA only, so it keeps another format's records as they came (TRANSFORM_UNSUPPORTED).
-export SPLIT_FORMAT="${SDH_SPLIT_FORMAT:-ccda}" SPLIT_OPTIONS="${SDH_SPLIT_OPTIONS:-{}}"
-export CONVERT_OPTIONS="${SDH_CONVERT_OPTIONS:-{}}"
+# The empty map is a variable: in "${X:-{}}" bash ends the default at the first }, so a set X gained a stray }.
+no_options='{}'
+export SPLIT_FORMAT="${SDH_SPLIT_FORMAT:-ccda}" SPLIT_OPTIONS="${SDH_SPLIT_OPTIONS:-$no_options}"
+export CONVERT_OPTIONS="${SDH_CONVERT_OPTIONS:-$no_options}"
 # The split pods' pool for their registry, leases and checkpoints (sdh.lease.jdbc.pool-size; 2, the product's
 # default), each wait for one of its connections timed as split's pool_wait (docs/PERFORMANCE.md §13.3). PgBouncer
 # gives a role 40 server connections (k8s/infra/state.yaml), so 6 pods of more than 6 can queue there instead.

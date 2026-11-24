@@ -7,6 +7,7 @@
 package com.sdh.healthcare.connector.stage.control;
 
 import com.nimbusds.jose.util.JSONObjectUtils;
+import com.sdh.healthcare.connector.core.storage.SchemaChanges;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -266,7 +267,7 @@ public final class ControlStore
                       holder_until    timestamptz,
                       updated_at      timestamptz NOT NULL
                     )""".formatted(operations));
-            statement.execute("CREATE INDEX IF NOT EXISTS"
+            SchemaChanges.apply(statement, "CREATE INDEX IF NOT EXISTS"
                     + " sdh_control_operations_scope ON " + operations
                     + " (scope, requested_at DESC, id DESC)");
         }

@@ -41,7 +41,16 @@ public final class TestPostgres
     }
 
     /**
-     * The database, started on first use and stopped when the JVM exits.
+     * The system property that starts the database with
+     * {@code pg_stat_statements} loaded, for a performance test that counts
+     * its statements (docs/PERFORMANCE.md §13.3).
+     */
+    public static final String STATEMENTS = "sdh.test.pg.statements";
+
+    /**
+     * The database, started on first use and stopped when the JVM exits;
+     * with {@code pg_stat_statements} loaded if {@value #STATEMENTS} is
+     * {@code true}.
      *
      * @return the database
      * @throws UncheckedIOException if it can't be started
@@ -52,7 +61,15 @@ public final class TestPostgres
         {
             try
             {
-                postgres = EmbeddedPostgres.builder().start();
+                EmbeddedPostgres.Builder builder = EmbeddedPostgres.builder();
+                if (Boolean.getBoolean(STATEMENTS))
+                {
+                    builder.setServerConfig("shared_preload_libraries",
+                            "pg_stat_statements")
+                            .setServerConfig("pg_stat_statements.track",
+                                    "all");
+                }
+                postgres = builder.start();
             }
             catch (IOException failure)
             {

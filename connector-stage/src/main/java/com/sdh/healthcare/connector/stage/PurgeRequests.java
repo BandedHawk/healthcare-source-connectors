@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.stage;
 
+import com.sdh.healthcare.connector.core.storage.SchemaChanges;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -216,7 +217,7 @@ public final class PurgeRequests
                       failure      text,
                       updated_at   timestamptz NOT NULL
                     )""".formatted(table));
-            statement.execute("CREATE INDEX IF NOT EXISTS"
+            SchemaChanges.apply(statement, "CREATE INDEX IF NOT EXISTS"
                     + " sdh_control_purges_active ON " + table
                     + " (scope, state, requested_at)");
         }

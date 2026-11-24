@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.stage;
 
+import com.sdh.healthcare.connector.core.storage.SchemaChanges;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -306,7 +307,7 @@ public final class ControlState
                     "erase_id text", "erased_by text",
                     "erased_at timestamptz"))
             {
-                statement.execute("ALTER TABLE " + table
+                SchemaChanges.apply(statement, "ALTER TABLE " + table
                         + " ADD COLUMN IF NOT EXISTS " + column);
             }
         }

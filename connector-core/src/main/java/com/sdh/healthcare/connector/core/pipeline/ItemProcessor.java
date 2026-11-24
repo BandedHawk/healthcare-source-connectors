@@ -369,15 +369,32 @@ public final class ItemProcessor
      */
     private boolean wholeItemCorrected(UUID itemId)
     {
-        int generation = pipeline.checkpoint(itemId)
-                .map(Checkpoint::generation).orElse(1);
+        return wholeItemCorrected(itemId, null);
+    }
+
+    /**
+     * Whether an operator's correction or retry of an item as a whole
+     * passed, its stored generation given.
+     *
+     * @param itemId     the item
+     * @param generation its stored checkpoint's generation; null to read
+     *                   it
+     * @return true if its failure as a whole is superseded, with no
+     *         failure of a later revision open in its place (STAGES.md
+     *         §15.8.5)
+     */
+    private boolean wholeItemCorrected(UUID itemId, Integer generation)
+    {
+        int current = generation != null ? generation
+                : pipeline.checkpoint(itemId).map(Checkpoint::generation)
+                        .orElse(1);
         // Only a revision of the item's own generation, as corrections of
         // it were before they made generations (STAGES.md §15.8.5).
         return failures != null && failures.failures(itemId).stream()
                 .anyMatch(stored -> stored.failure().seq()
                         == FailureStore.WHOLE_ITEM
                         && stored.failure().lineage().generation()
-                                == generation
+                                == current
                         && stored.state() == FailureStore.State.SUPERSEDED
                         && !stored.failure().lineage().first());
     }
@@ -646,7 +663,8 @@ public final class ItemProcessor
                 }
                 case ARCHIVING ->
                 {
-                    return finishCompletion(checkpoint, landing, lease);
+                    return finishCompletion(checkpoint, landing, lease,
+                            endedAt);
                 }
                 case HELD ->
                 {
@@ -702,7 +720,8 @@ public final class ItemProcessor
             return fail(failingCheckpoint(itemId, size, failure,
                     fresh ? cut : null), landing, lease);
         }
-        return finishCompletion(split.checkpoint(), landing, lease);
+        return finishCompletion(split.checkpoint(), landing, lease,
+                split.endedAt());
     }
 
     /**
@@ -741,7 +760,8 @@ public final class ItemProcessor
                 case SPLITTING, HELD -> interrupt(pipeline.resume(itemId,
                         lease).orElseThrow(), landing, lease,
                         cut.generation());
-                case ARCHIVING -> finishCompletion(current, landing, lease);
+                case ARCHIVING -> finishCompletion(current, landing, lease,
+                        stored.get().endedAt());
                 case FAILING -> finishFailure(current, landing, lease);
                 case INTERRUPTED -> announce(current, landing,
                         stored.get().endedAt());
@@ -921,17 +941,23 @@ public final class ItemProcessor
     /**
      * Sends {@code item.split} and writes {@code COMPLETED}.
      *
-     * @param checkpoint the {@code ARCHIVING} checkpoint
+     * @param checkpoint the {@code ARCHIVING} checkpoint, as stored
      * @param landing    what came with the item from landing
      * @param lease      its lease
+     * @param endedAt    when its splitting ended, as stored with that
+     *                   checkpoint; null to read it
      * @return the outcome
      * @throws Exception if the broker or the store fails
      */
     private Outcome finishCompletion(Checkpoint checkpoint, Landing landing,
-            LeaseToken lease) throws Exception
+            LeaseToken lease, Instant endedAt) throws Exception
     {
         UUID itemId = checkpoint.itemId();
-        Ended announced = announce(checkpoint, landing, endedAt(itemId));
+        // The checkpoint is the item's stored one, under its lease, so its
+        // generation is the stored generation (docs/PERFORMANCE.md §13.3).
+        Ended announced = announce(checkpoint, landing,
+                endedAt != null ? endedAt : endedAt(itemId),
+                checkpoint.generation());
         long completing = System.nanoTime();
         pipeline.commitCheckpoint(
                 checkpoint.withState(Checkpoint.State.COMPLETED), lease);
@@ -993,6 +1019,25 @@ public final class ItemProcessor
     private Ended announce(Checkpoint checkpoint, Landing landing,
             Instant endedAt) throws Exception
     {
+        return announce(checkpoint, landing, endedAt, null);
+    }
+
+    /**
+     * Records an item's failures and sends the message that ends it, as
+     * {@link #announce(Checkpoint, Landing, Instant)} does, its stored
+     * generation given.
+     *
+     * @param checkpoint its checkpoint
+     * @param landing    what came with it from landing
+     * @param endedAt    when its splitting ended, as stored
+     * @param generation its stored checkpoint's generation; null to read
+     *                   it
+     * @return what was sent
+     * @throws Exception if the store or the broker fails
+     */
+    private Ended announce(Checkpoint checkpoint, Landing landing,
+            Instant endedAt, Integer generation) throws Exception
+    {
         UUID itemId = checkpoint.itemId();
         long started = System.nanoTime();
         List<CommittedRecords.Row> failed = pipeline.failedRows(checkpoint);
@@ -1019,7 +1064,7 @@ public final class ItemProcessor
                                 ? pipeline.correctionRows(itemId,
                                         checkpoint.generation())
                                 : List.of(),
-                        wholeItemCorrected(itemId));
+                        wholeItemCorrected(itemId, generation));
         started = timed("correction_rows", started);
         // Numbered before it is sent (STAGES.md §15.6e).
         // An interrupted generation's end is a completion of its own.

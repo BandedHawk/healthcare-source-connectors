@@ -155,6 +155,18 @@ class SplitFanOutPerf
     /** The points' results, in order. */
     static final List<Point> POINTS = new ArrayList<>();
 
+    /**
+     * Each point's statements, by its name, with
+     * {@code -Dsdh.test.pg.statements=true}: the commonest, as
+     * {@code pg_stat_statements} normalises them (no values), with their
+     * calls an item.
+     */
+    static final Map<String, List<String>> STATEMENTS =
+            new LinkedHashMap<>();
+
+    /** The most statements listed a point. */
+    static final int STATEMENTS_LISTED = 40;
+
     /** Creates the tests; JUnit runs each test on a new instance. */
     SplitFanOutPerf()
     {
@@ -475,6 +487,7 @@ class SplitFanOutPerf
                         shape.concurrency());
                 Thread.sleep(STATS_SETTLE.toMillis());
                 Map<String, Phase> phasesBefore = phases();
+                resetStatements();
                 before = postgres();
                 ResourceMonitor monitor = ResourceMonitor.start();
                 long start = System.nanoTime();
@@ -517,6 +530,7 @@ class SplitFanOutPerf
                 }
                 Thread.sleep(STATS_SETTLE.toMillis());
                 after = postgres();
+                STATEMENTS.put(name, statements(items.size()));
                 point = new Point(shape, RECORDS.get(), bytes, last - start,
                         latency.summary(), resources,
                         minus(phases(), phasesBefore), before.to(after));
@@ -646,6 +660,64 @@ class SplitFanOutPerf
                     rows.getLong(3), rows.getLong(4), rows.getLong(5),
                     postgresCpu(TestPostgres.get().getPort()));
         }
+    }
+
+    /**
+     * Clears {@code pg_stat_statements}, when it is loaded.
+     *
+     * @throws Exception if it can't be cleared
+     */
+    static void resetStatements() throws Exception
+    {
+        if (!Boolean.getBoolean(TestPostgres.STATEMENTS))
+        {
+            return;
+        }
+        try (Connection connection = TestPostgres.dataSource()
+                .getConnection();
+                Statement statement = connection.createStatement())
+        {
+            statement.execute(
+                    "CREATE EXTENSION IF NOT EXISTS pg_stat_statements");
+            statement.execute("SELECT pg_stat_statements_reset()");
+        }
+    }
+
+    /**
+     * The commonest statements since {@link #resetStatements}, each as a
+     * table row: its calls an item, its mean milliseconds and its text on
+     * one line; none unless {@code pg_stat_statements} is loaded.
+     *
+     * @param items the point's items
+     * @return the rows
+     * @throws Exception if they can't be read
+     */
+    static List<String> statements(int items) throws Exception
+    {
+        List<String> rows = new ArrayList<>();
+        if (!Boolean.getBoolean(TestPostgres.STATEMENTS))
+        {
+            return rows;
+        }
+        try (Connection connection = TestPostgres.dataSource()
+                .getConnection();
+                Statement statement = connection.createStatement();
+                ResultSet found = statement.executeQuery("""
+                        SELECT calls, mean_exec_time,
+                               regexp_replace(query, '\\s+', ' ', 'g')
+                          FROM pg_stat_statements
+                         ORDER BY calls DESC
+                         LIMIT """ + " " + STATEMENTS_LISTED))
+        {
+            while (found.next())
+            {
+                rows.add(String.format("| %.2f | %.3f | `%s` |",
+                        (double) found.getLong(1) / items,
+                        found.getDouble(2),
+                        found.getString(3).replace("|", "\\|")));
+            }
+        }
+        return rows;
     }
 
     /**
@@ -891,6 +963,16 @@ class SplitFanOutPerf
                             times.sum() * 1e3 / shape.items(),
                             times.sum() * 1e6 / Math.max(1,
                                     point.records()))));
+            List<String> statements = STATEMENTS.getOrDefault(shape.name(),
+                    List.of());
+            if (!statements.isEmpty())
+            {
+                out.append("\nStatements (pg_stat_statements, the ")
+                        .append(STATEMENTS_LISTED)
+                        .append(" commonest):\n\n| calls/item | mean ms"
+                                + " | statement |\n|---:|---:|---|\n");
+                statements.forEach(row -> out.append(row).append('\n'));
+            }
         }
         return out.toString();
     }

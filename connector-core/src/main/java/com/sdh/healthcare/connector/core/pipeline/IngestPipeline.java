@@ -127,9 +127,12 @@ public final class IngestPipeline implements AutoCloseable
      * @param itemId      the file's id
      * @param recordCount how many records it was split into
      * @param checkpoint  the checkpoint after the split phase
+     * @param endedAt     when its splitting ended, as stored with that
+     *                    checkpoint; null if not known here, for the caller
+     *                    to read (docs/PERFORMANCE.md §13.3)
      */
     public record SplitResult(UUID itemId, long recordCount,
-            Checkpoint checkpoint)
+            Checkpoint checkpoint, Instant endedAt)
     {
     }
 
@@ -509,7 +512,7 @@ public final class IngestPipeline implements AutoCloseable
         if (current != null && current.state() == Checkpoint.State.ARCHIVING)
         {
             return new SplitResult(current.itemId(), current.recordCount(),
-                    current);
+                    current, null);
         }
         if (current != null && current.state() == Checkpoint.State.HELD)
         {
@@ -864,13 +867,13 @@ public final class IngestPipeline implements AutoCloseable
                 // pieces (docs/PERFORMANCE.md §3.4).
                 current = current.withClean();
             }
-            commitCheckpoint(current, lease);
+            Instant endedAt = commitCheckpoint(current, lease);
             timed("archive", archiving);
             Telemetry.get().audit("item.split",
                     Fields.of(Attr.ITEM_ID, current.itemId())
                             .with(Attr.COUNT, current.recordCount()));
             return new SplitResult(current.itemId(), current.recordCount(),
-                    current);
+                    current, endedAt);
         }
         finally
         {
@@ -1447,12 +1450,14 @@ public final class IngestPipeline implements AutoCloseable
      *
      * @param next  the checkpoint
      * @param lease the item's lease
+     * @return when the item's splitting ended, as now stored; null if it
+     *         hasn't
      * @throws LeaseLostException    if the lease was lost or taken over
      * @throws IllegalStateException if the database can't be reached
      */
-    void commitCheckpoint(Checkpoint next, LeaseToken lease)
+    Instant commitCheckpoint(Checkpoint next, LeaseToken lease)
     {
-        checkpoints.save(next, lease);
+        return checkpoints.save(next, lease);
     }
 
     // ---- publishing ----

@@ -1773,3 +1773,41 @@ linger; `target/perf/split-fanout-20261124T003254Z.md` and `…T003714Z.md`):**
   the network, and Postgres short of CPU), 2 connections let a pod finish about 2 / (19 × 0.01) ≈ 10 items a
   second; run 69's pods did about 9 (54 a second on 6). That fits, but it is arithmetic, not a measurement: runs K
   and L (pool 2 and 6, the same load) at the visit will show it.
+
+**What an item asks of Postgres** (`SplitFanOutPerf -Dsdh.test.pg.statements=true`, which loads
+`pg_stat_statements` into the embedded server and lists each statement's calls an item; one-row items, pool 8,
+`target/perf/split-fanout-20261124T010607Z.md`). On the stage's own pool, about 20 statements an item, nearly all
+in autocommit, so each its own transaction:
+
+| Statements an item | What |
+|---:|---|
+| 4 reads, 7 writes | the item's own `split_item` row: 4 checkpoints (`SPLITTING`, the batch's pending one, `ARCHIVING`, `COMPLETED`), its epoch, its completion number and `announced_at` |
+| 2 | the item's lease, taken and released |
+| 6 | its landed time, the copy check, its failures counted and listed, the corrections check, `SELECT clock_timestamp()` |
+
+Beside them, on pools of their own: 7 audit events an item (the journal, about 7 a transaction with the linger)
+and the shared commit's queue, about 0.06 statements an item each.
+
+Of the four reads, two were of what the item had just written, under its lease: `ended_at`, which the `ARCHIVING`
+write sets from the database's clock, read back at completion; and the generation, read again to check for a
+whole-item correction although completion holds the stored checkpoint. **Both are gone** (DESIGN.md revision (ey)):
+the checkpoint write returns `ended_at` (`RETURNING`), and completion passes the generation it has. The other two
+stay: `run()` reads the item's state, and `split()` reads it again after `started()` may have written it.
+Measured again after (`split-fanout-20261124T011351Z.md`): the item's row read 2 times an item (4), Postgres transactions 16.1 an item (17.0); items a second within noise (462), as expected here, where they don't set the pace.
+
+The rest is the item protocol itself (STAGES.md §8): each checkpoint is a recovery point, the lease fences the
+item against another pod, and the failure and correction reads keep a resubmission's end right. So a few more
+statements could go, but **the large saving is structural: the record stages' way, one claim, register and
+complete for a batch of items, which for one-record items would take split from about 20 statements a document
+to a few.** That is a design change to the split stage's checkpoints and leases, for after runs K and L.
+
+**Run K on AWS (pool 2, 2026-11-24 01:30 UTC; C-CDA, 30,000 objects at 100 a second, one graceful landing
+failover).** Every object landed exactly once and every item ended at transform; nothing was left. Split ended its
+items at 660 a minute (11 a second), but **on 1.3 splitter pods on average of the 6 allowed**: 14 pods scaled up
+while the append queue was busy failed to start ("Could not create the append queue's tables") and were replaced
+until scale-down. Their startup statements waited on the queue's writers: `CREATE INDEX IF NOT EXISTS` takes a
+SHARE lock before it looks whether the index is there, and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` an ACCESS
+EXCLUSIVE one, each held up behind open writes past the query timeout, and holding up the table's other statements
+while it waited. **Fixed as DESIGN.md revision (ez)**: an index or column already there is found in the catalogs
+and its statement left out; not yet in the AWS images. Per pod, K's split did about 8.5 items a second, run 69's
+pace, so it stands as the pool-2 baseline; run L (pool 6, the same image) is the comparison.

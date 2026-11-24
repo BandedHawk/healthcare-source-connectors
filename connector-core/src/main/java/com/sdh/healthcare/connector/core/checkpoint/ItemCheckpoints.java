@@ -7,6 +7,7 @@
 package com.sdh.healthcare.connector.core.checkpoint;
 
 import com.sdh.healthcare.connector.core.failure.FailureStore;
+import com.sdh.healthcare.connector.core.storage.SchemaChanges;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
@@ -151,33 +152,33 @@ public final class ItemCheckpoints
             statement.setQueryTimeout(queryTimeoutSeconds);
             statement.execute("CREATE SCHEMA IF NOT EXISTS "
                     + table.substring(0, table.indexOf('.')));
-            statement.execute(ddl);
+            SchemaChanges.apply(statement, ddl);
             // Added 2026-11-09 (STAGES.md §15.6e): how many times the item's
             // end was sent as item.split, and whether the last end sent was
             // one, so a reopened item completes again under a new number.
-            statement.execute("ALTER TABLE " + table
+            SchemaChanges.apply(statement, "ALTER TABLE " + table
                     + " ADD COLUMN IF NOT EXISTS completion integer"
                     + " NOT NULL DEFAULT 0");
-            statement.execute("ALTER TABLE " + table
+            SchemaChanges.apply(statement, "ALTER TABLE " + table
                     + " ADD COLUMN IF NOT EXISTS completed boolean"
                     + " NOT NULL DEFAULT false");
             // Added 2026-11-09 (STAGES.md §15.8): the generation the
             // checkpoint is of, and the version cutting it, in plain text
             // for queries; a row from before is of the first generation.
-            statement.execute("ALTER TABLE " + table
+            SchemaChanges.apply(statement, "ALTER TABLE " + table
                     + " ADD COLUMN IF NOT EXISTS generation integer"
                     + " NOT NULL DEFAULT 1");
-            statement.execute("ALTER TABLE " + table
+            SchemaChanges.apply(statement, "ALTER TABLE " + table
                     + " ADD COLUMN IF NOT EXISTS version text");
             // Added 2026-11-09 (STAGES.md §15.8.10 step 5): when the
             // failures last counted in an end sent were read, so a pod
             // sends the end again once one changes (an operator's decline
             // or reopen). Rows from before take the time it was added, as
             // their ends were sent by the operator's command.
-            statement.execute("ALTER TABLE " + table
+            SchemaChanges.apply(statement, "ALTER TABLE " + table
                     + " ADD COLUMN IF NOT EXISTS announced_at timestamptz"
                     + " DEFAULT clock_timestamp()");
-            statement.execute("ALTER TABLE " + table
+            SchemaChanges.apply(statement, "ALTER TABLE " + table
                     + " ALTER COLUMN announced_at DROP DEFAULT");
             // Added 2026-11-10 (STAGES.md §15.5a): the earlier item each
             // copy is the same as, from its item.landed, so every end sent
@@ -306,10 +307,12 @@ public final class ItemCheckpoints
      *
      * @param checkpoint the checkpoint
      * @param lease      the item's lease
+     * @return when splitting ended, as now stored, so the caller needn't
+     *         read it back (docs/PERFORMANCE.md §13.3); null if it hasn't
      * @throws LeaseLostException    if the lease was lost or taken over
      * @throws IllegalStateException if the database can't be reached
      */
-    public void save(Checkpoint checkpoint, LeaseToken lease)
+    public Instant save(Checkpoint checkpoint, LeaseToken lease)
     {
         Checkpoint.State state = checkpoint.state();
         boolean ended = state == Checkpoint.State.ARCHIVING
@@ -342,9 +345,10 @@ public final class ItemCheckpoints
                        generation = EXCLUDED.generation,
                        version = EXCLUDED.version
                  WHERE s.epoch <= EXCLUDED.epoch
-                   AND s.generation <= EXCLUDED.generation"""
+                   AND s.generation <= EXCLUDED.generation
+                RETURNING s.ended_at"""
                 .formatted(table);
-        write(sql, checkpoint, lease, ended);
+        return write(sql, checkpoint, lease, ended);
     }
 
     /**
@@ -993,14 +997,15 @@ public final class ItemCheckpoints
      * Runs a fenced write of a checkpoint.
      *
      * @param sql        the statement: item, epoch, checkpoint, state,
-     *                   ended
+     *                   ended; returning the row's {@code ended_at}
      * @param checkpoint the checkpoint
      * @param lease      the item's lease
      * @param ended      whether the item's splitting has ended
+     * @return the row's {@code ended_at} as written; null if unset
      * @throws LeaseLostException    if no row was written
      * @throws IllegalStateException if the database can't be reached
      */
-    private void write(String sql, Checkpoint checkpoint, LeaseToken lease,
+    private Instant write(String sql, Checkpoint checkpoint, LeaseToken lease,
             boolean ended)
     {
         lease.checkHeld();
@@ -1015,9 +1020,15 @@ public final class ItemCheckpoints
             upsert.setBoolean(5, ended);
             upsert.setInt(6, checkpoint.generation());
             upsert.setString(7, checkpoint.version());
-            if (upsert.executeUpdate() != 1)
+            try (ResultSet written = upsert.executeQuery())
             {
-                throw new LeaseLostException(LeaseLostException.Reason.FENCED);
+                if (!written.next())
+                {
+                    throw new LeaseLostException(
+                            LeaseLostException.Reason.FENCED);
+                }
+                Timestamp endedAt = written.getTimestamp(1);
+                return endedAt == null ? null : endedAt.toInstant();
             }
         }
         catch (SQLException failure)

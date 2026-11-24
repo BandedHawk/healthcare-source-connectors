@@ -11,6 +11,7 @@ import com.sdh.healthcare.connector.contract.message.MessageType;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import com.sdh.healthcare.connector.core.storage.SchemaChanges;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
@@ -434,42 +435,42 @@ public final class StageRegistry
             statement.setQueryTimeout(queryTimeoutSeconds);
             statement.execute("CREATE SCHEMA IF NOT EXISTS "
                     + records.substring(0, records.indexOf('.')));
-            statement.execute(recordDdl);
+            SchemaChanges.apply(statement, recordDdl);
             // Kept since 2026-11-06 (STAGES.md §6); added to older tables.
-            statement.execute("ALTER TABLE " + records
+            SchemaChanges.apply(statement, "ALTER TABLE " + records
                     + " ADD COLUMN IF NOT EXISTS output_version text");
-            statement.execute(itemDdl);
-            statement.execute(reconcileDdl);
-            statement.execute(backlogDdl);
+            SchemaChanges.apply(statement, itemDdl);
+            SchemaChanges.apply(statement, reconcileDdl);
+            SchemaChanges.apply(statement, backlogDdl);
             // Made NOT NULL by the first build of it, which then never
             // recorded a wait at startup with no backlog yet seen.
-            statement.execute("ALTER TABLE " + backlog
+            SchemaChanges.apply(statement, "ALTER TABLE " + backlog
                     + " ALTER COLUMN seen_at DROP NOT NULL");
             // Added 2026-11-08 (STAGES.md §15.6): a total from the stage
             // before's item.progress, which may grow, and the counts of the
             // last item.progress this stage sent.
-            statement.execute("ALTER TABLE " + items
+            SchemaChanges.apply(statement, "ALTER TABLE " + items
                     + " ADD COLUMN IF NOT EXISTS upstream_open boolean"
                     + " NOT NULL DEFAULT false");
-            statement.execute("ALTER TABLE " + items
+            SchemaChanges.apply(statement, "ALTER TABLE " + items
                     + " ADD COLUMN IF NOT EXISTS progress_key text");
-            statement.execute("ALTER TABLE " + items
+            SchemaChanges.apply(statement, "ALTER TABLE " + items
                     + " ADD COLUMN IF NOT EXISTS progress_at timestamptz");
             // Added 2026-11-09 (STAGES.md §15.6e): how many times this
             // stage completed the item, and the completion of the stage
             // before its total is from, so an item reopened upstream is
             // reopened here and a stale message changes nothing.
-            statement.execute("ALTER TABLE " + items
+            SchemaChanges.apply(statement, "ALTER TABLE " + items
                     + " ADD COLUMN IF NOT EXISTS completion integer"
                     + " NOT NULL DEFAULT 0");
-            statement.execute("ALTER TABLE " + items
+            SchemaChanges.apply(statement, "ALTER TABLE " + items
                     + " ADD COLUMN IF NOT EXISTS upstream_completion integer"
                     + " NOT NULL DEFAULT 0");
             // Added 2026-11-09 (STAGES.md §15.8.7): whether a report of the
             // item was sent here, in any generation; a new generation
             // starts its counts again, but not this. An item reported
             // before it was kept shows it by its counts.
-            statement.execute("ALTER TABLE " + items
+            SchemaChanges.apply(statement, "ALTER TABLE " + items
                     + " ADD COLUMN IF NOT EXISTS reported boolean"
                     + " NOT NULL DEFAULT false");
             statement.execute("UPDATE " + items + " SET reported = true"
@@ -480,57 +481,60 @@ public final class StageRegistry
             // current, and whether one arrived after a newer one; and each
             // item's generation, whose records alone it counts. Rows from
             // before are the first of everything.
-            statement.execute("ALTER TABLE " + records
+            SchemaChanges.apply(statement, "ALTER TABLE " + records
                     + " ADD COLUMN IF NOT EXISTS seq bigint");
-            statement.execute("ALTER TABLE " + records
+            SchemaChanges.apply(statement, "ALTER TABLE " + records
                     + " ADD COLUMN IF NOT EXISTS generation integer"
                     + " NOT NULL DEFAULT 1");
-            statement.execute("ALTER TABLE " + records
+            SchemaChanges.apply(statement, "ALTER TABLE " + records
                     + " ADD COLUMN IF NOT EXISTS line integer[]"
                     + " NOT NULL DEFAULT '{}'");
-            statement.execute("ALTER TABLE " + records
+            SchemaChanges.apply(statement, "ALTER TABLE " + records
                     + " ADD COLUMN IF NOT EXISTS late boolean"
                     + " NOT NULL DEFAULT false");
-            statement.execute("ALTER TABLE " + records
+            SchemaChanges.apply(statement, "ALTER TABLE " + records
                     + " ADD COLUMN IF NOT EXISTS superseded_at timestamptz");
-            statement.execute("CREATE INDEX IF NOT EXISTS stage_record_place"
+            SchemaChanges.apply(statement,
+                    "CREATE INDEX IF NOT EXISTS stage_record_place"
                     + " ON " + records + " (stage, item_id, generation, seq)");
             // Added 2026-11-18 (STAGES.md §10): the claims alone, few at
             // any time, for the sweep of expired ones.
-            statement.execute("CREATE INDEX IF NOT EXISTS stage_record_claimed"
+            SchemaChanges.apply(statement,
+                    "CREATE INDEX IF NOT EXISTS stage_record_claimed"
                     + " ON " + records + " (stage, claim_expires)"
                     + " WHERE state = 'CLAIMED'");
             // Added 2026-11-09 (§15.8.5): the correction a row was made
             // from, for one claimed under its place's key.
-            statement.execute("ALTER TABLE " + records
+            SchemaChanges.apply(statement, "ALTER TABLE " + records
                     + " ADD COLUMN IF NOT EXISTS correction integer");
-            statement.execute("ALTER TABLE " + items
+            SchemaChanges.apply(statement, "ALTER TABLE " + items
                     + " ADD COLUMN IF NOT EXISTS generation integer"
                     + " NOT NULL DEFAULT 1");
             numberEarlierCompletions(statement);
             // Added 2026-11-16 (STAGES.md §13.2): when the reconciler found
             // the item's records all here but its end from the stage before
             // missing, for that stage to send it again.
-            statement.execute("ALTER TABLE " + items
+            SchemaChanges.apply(statement, "ALTER TABLE " + items
                     + " ADD COLUMN IF NOT EXISTS total_wanted_at timestamptz");
-            statement.execute("CREATE INDEX IF NOT EXISTS stage_item_wanted"
+            SchemaChanges.apply(statement,
+                    "CREATE INDEX IF NOT EXISTS stage_item_wanted"
                     + " ON " + items + " (stage, total_wanted_at)");
             for (String ddl : FailureStore.ddls(failures,
                     failures.substring(0, failures.indexOf('.'))
                             + ".stage_failure_event"))
             {
-                statement.execute(ddl);
+                SchemaChanges.apply(statement, ddl);
             }
             // Added 2026-11-09 (STAGES.md §15.8.4): reprocess runs.
             for (String ddl : ReprocessStore.ddls(schema()))
             {
-                statement.execute(ddl);
+                SchemaChanges.apply(statement, ddl);
             }
             // Added 2026-11-08 (STAGES.md §15.6c): operators' corrections.
             for (String ddl : CorrectionStore.ddls(
                     CorrectionStore.table(schema())))
             {
-                statement.execute(ddl);
+                SchemaChanges.apply(statement, ddl);
             }
         }
         catch (SQLException failure)

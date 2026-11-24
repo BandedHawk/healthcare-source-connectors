@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.core.pipeline;
 
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
+import com.sdh.healthcare.connector.core.storage.SchemaChanges;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import java.io.IOException;
 import java.io.InterruptedIOException;
@@ -345,7 +346,7 @@ public final class QueuedCommits implements GroupAppender.Committer
                       queued_at   timestamptz NOT NULL,
                       updated_at  timestamptz NOT NULL
                     )""".formatted(queue));
-            statement.execute("CREATE INDEX IF NOT EXISTS "
+            SchemaChanges.apply(statement, "CREATE INDEX IF NOT EXISTS "
                     + "append_queue_waiting ON " + queue
                     + " (table_name, state)");
             statement.execute("""
@@ -356,7 +357,7 @@ public final class QueuedCommits implements GroupAppender.Committer
                       epoch      bigint NOT NULL,
                       PRIMARY KEY (append_id, lease_name)
                     )""".formatted(queueLeases, queue));
-            statement.execute("CREATE INDEX IF NOT EXISTS "
+            SchemaChanges.apply(statement, "CREATE INDEX IF NOT EXISTS "
                     + "append_queue_lease_name ON " + queueLeases
                     + " (lease_name)");
         }

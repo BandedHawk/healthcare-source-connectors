@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.core.checkpoint;
 
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.core.failure.FailureReason;
+import com.sdh.healthcare.connector.core.storage.SchemaChanges;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
@@ -129,8 +130,8 @@ public final class HoldReleases
             statement.setQueryTimeout(timeout);
             statement.execute("CREATE SCHEMA IF NOT EXISTS "
                     + table.substring(0, table.indexOf('.')));
-            statement.execute(ddl);
-            statement.execute("CREATE INDEX IF NOT EXISTS"
+            SchemaChanges.apply(statement, ddl);
+            SchemaChanges.apply(statement, "CREATE INDEX IF NOT EXISTS"
                     + " split_release_pending ON " + table
                     + " (state, requested_at)");
         }

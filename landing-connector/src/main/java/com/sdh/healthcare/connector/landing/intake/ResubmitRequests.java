@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.landing.intake;
 
+import com.sdh.healthcare.connector.core.storage.SchemaChanges;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -200,8 +201,8 @@ public final class ResubmitRequests
                 Statement statement = connection.createStatement())
         {
             statement.setQueryTimeout(queryTimeoutSeconds);
-            statement.execute(ddl);
-            statement.execute(open);
+            SchemaChanges.apply(statement, ddl);
+            SchemaChanges.apply(statement, open);
         }
         catch (SQLException failure)
         {

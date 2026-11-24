@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.core.audit;
 
+import com.sdh.healthcare.connector.core.storage.SchemaChanges;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -139,9 +140,10 @@ public record AuditTables(String schema)
                       seal      text        NOT NULL,
                       PRIMARY KEY (chain_id, seq)
                     )""".formatted(seals()));
-            statement.execute("CREATE INDEX IF NOT EXISTS sdh_audit_event_at"
+            SchemaChanges.apply(statement,
+                    "CREATE INDEX IF NOT EXISTS sdh_audit_event_at"
                     + " ON " + events() + " (at)");
-            statement.execute("CREATE INDEX IF NOT EXISTS"
+            SchemaChanges.apply(statement, "CREATE INDEX IF NOT EXISTS"
                     + " sdh_audit_chain_updated ON " + chains()
                     + " (updated_at)");
         }

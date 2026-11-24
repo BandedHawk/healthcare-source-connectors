@@ -259,6 +259,31 @@ class QueuedCommitsTest
     }
 
     /**
+     * A pod starting while others write to the queue finds its tables
+     * without waiting on those writers: an index made if it is missing
+     * would otherwise wait for every open write to the table, and hold up
+     * every write after it meanwhile (AWS run K, 2026-11-24: new split pods
+     * failed to start).
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void aStartingPodDoesNotWaitOnTheQueuesWriters() throws Exception
+    {
+        committer();
+        try (Connection writer = database.getConnection();
+                Statement statement = writer.createStatement())
+        {
+            writer.setAutoCommit(false);
+            statement.execute("LOCK TABLE " + schema + ".append_queue, "
+                    + schema + ".append_queue_lease IN ROW EXCLUSIVE MODE");
+            Future<QueuedCommits> starting = senders.submit(this::committer);
+            assertThat(starting.get(5, TimeUnit.SECONDS)).isNotNull();
+            writer.rollback();
+        }
+    }
+
+    /**
      * Groups queued by two pods while the lock is held go in one commit,
      * whichever pod takes the turn, and each pod is told its snapshot.
      *

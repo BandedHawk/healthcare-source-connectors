@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import com.sdh.healthcare.connector.contract.message.Lineage;
+import com.sdh.healthcare.connector.core.storage.SchemaChanges;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
@@ -221,7 +222,7 @@ public final class CorrectionStore
             statement.setQueryTimeout(timeout);
             for (String ddl : ddls(table))
             {
-                statement.execute(ddl);
+                SchemaChanges.apply(statement, ddl);
             }
         }
         catch (SQLException failure)

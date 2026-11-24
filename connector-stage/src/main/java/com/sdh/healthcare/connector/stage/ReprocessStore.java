@@ -12,6 +12,7 @@ import com.sdh.healthcare.connector.core.failure.FailureReason;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.failure.Revisions;
 import com.sdh.healthcare.connector.core.pipeline.UuidV7;
+import com.sdh.healthcare.connector.core.storage.SchemaChanges;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
@@ -238,7 +239,7 @@ public final class ReprocessStore
             statement.setQueryTimeout(timeout);
             for (String ddl : ddls(schema))
             {
-                statement.execute(ddl);
+                SchemaChanges.apply(statement, ddl);
             }
         }
         catch (SQLException failure)
