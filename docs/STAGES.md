@@ -3324,4 +3324,12 @@ part): the split registry's statements an item fell **from 17 to 9** (Part A), a
 them to **6.3 an item at 64 at once**, not the hoped-for 1 or 2: on a local Postgres each statement takes 0.02 to
 0.06 ms, so few meet another of their kind. Throughput did not change locally (329 against 324 items a second at
 64 at once; split's local pace is the Iceberg append, 86 ms of an item's 114). Where it should count is AWS,
-where each statement waits about 1 ms and more behind PgBouncer: §18.7 step 3, not yet run.
+where each statement waits about 1 ms and more behind PgBouncer: §18.7 step 3, below.
+
+**On AWS (runs M, N, O, 2026-11-24; PERFORMANCE.md §13.3, last part):** split ended its items as landing landed
+them (M: both by 351 s), 59.4 documents a second end to end against run L's 46.0; with gathering the wait for one
+of the pod's connections went from 71 ms a take, 19 takes an item, to none, at pool 6 and at pool 2 (10 ms, 3.8
+takes). Part A alone (N) gave 20 items a second a pod against L's 15.7. PgBouncer's clients waited under 0.3 ms
+and Postgres used 0.4 cores on average: the database was not the limit. Split is no longer the pace; the Iceberg
+append (1.25 s of a 2.1 s item) is what is left of an item's time. **The pool's default stays 2** (§18.8, 3;
+the user, after run O): DEPLOYMENT.md "Scaling" says when to raise it.

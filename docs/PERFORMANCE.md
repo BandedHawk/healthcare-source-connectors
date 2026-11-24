@@ -1895,4 +1895,47 @@ queue busy at the moment a pod starts).
   include the audit journal's and the append queue's; Postgres CPU fell from 3.2 to 2.8 s.
 - **Throughput is unchanged locally,** whose pace is the Iceberg append (86 ms of an item's 114), not the
   registry. The test that counts is AWS, where each statement waited 55 to 71 ms for a connection in runs K and
-  L: STAGES.md §18.7 step 3, not yet run.
+  L: runs M, N and O, below.
+
+**AWS runs M, N and O (2026-11-24 08:44 to 09:50 UTC; images with revisions (ez) and (fa)).** The load of K and
+L: C-CDA, 30,000 objects at 100 a second, no failover, a reset before each; run 49's maxima, the burst all
+m7gd.large Spot. A sampler beside them read, every 10 s, Postgres's backends by role, state and wait event and its
+CPU, and each minute PgBouncer's own `stats:` lines (counts and averages only; scratchpad `db-samples/`). Every
+run: exactly once, 0 left behind, no container restarted, **no splitter pod failed to start** (revision (ez) on
+AWS).
+
+| | L (before) | M | N | O |
+|---|---|---|---|---|
+| Pool / `registry-batch` | 6 / - | 6 / 64 | 6 / 1 (Part A only) | 2 / 64 |
+| Landed by (s) | | 351 | 385 | 312 |
+| **Split ended its 30,000 by (s)** | | **351** | 441 | 365 |
+| Split, items a second (all pods) | 56.5 | 85.5 (landing's pace) | 68.0 | 82.2 |
+| Splitter pods, avg / max | 3.6 / 6 | 3.8 / 6 | 3.4 / 6 | 3.1 / 6 |
+| Split, items a second a pod | 15.7 | ≥ 22.5 | 20.0 | ≥ 26.5 |
+| A split item, mean (s) | 3.34 | 2.12 | 2.81 | 2.24 |
+| of which `append` / `commit_queue` | 1.55 / 0.51 | 1.25 / 0.41 | 1.33 / 0.42 | 1.22 / 0.42 |
+| `pool_wait`: takes an item, mean a take (ms) | 19, 71 | **4.4, 0** | 9.3, 78 | **3.8, 10** |
+| Landed → split ended, p50 / p99 (s) | | 26 / 103 | 31 / 122 | 49 / 118 |
+| Landed → gold, p50 / p99 (s) | | 124 / 257 | 168 / 353 | 138 / 250 |
+| End to end, documents a second | 46.0 | **59.4** | 47.2 | 57.6 |
+| Cost, $ a million documents | | 13 | 15 | 13 |
+
+- **Split is no longer the pace.** In M it ended each item as landing landed it (both done at 351 s); in O it
+  ended 53 s after landing at pool 2. The pace is now convert and transform at their 12 and 18 pods (split ended
+  → convert's first record, p50 71 s in M). Per-pod rates of M and O are lower bounds: the pods waited for
+  items.
+- **Part A alone (N) gives about a quarter more a pod** (20.0 against L's 15.7): 9.3 takes of a connection an
+  item, not 19. But at 6 connections for 64 items each take still waited 78 ms, as in L. **Part B removes that
+  wait** (M: 4.4 takes an item, none waiting), **even at pool 2** (O: 3.8 takes, 10 ms each, 0.04 s an item).
+- **The database was not the limit, in any run.** PgBouncer's clients waited 0 to 0.23 ms on average for a
+  server connection, so the 40 server connections of the splitter's role (reached in N, 34 in M, 24 in O) never
+  queued much: **run L's wait was the pod's own pool after all, not PgBouncer's share** (the reading above,
+  "the limit moved to the database's share", is not borne out). Postgres used 0.4 cores on average, 1.3 at
+  most, of its node's 2. Its busiest waits were row locks (`Lock tuple`, `transactionid`) and WAL flushes, under
+  one backend of each on average.
+- **What an item's time is now:** of M's 2.12 s, the Iceberg append is 1.25 s (0.41 of it queued for the shared
+  commit) and the landed-summary read (`lookup_row`) 0.1 to 0.28 s; the Postgres steps together about 0.3 s.
+  **The append is the next lever,** if split's latency matters (landed → split ended, p50 26 s); its throughput
+  does not need more now.
+- **The pool's default (STAGES.md §18.8, 3):** with gathering, 2 is enough: O's waits came to 0.04 s an item,
+  and O ran 2 points of documents a second behind M, within the runs' spread. Not changed without the user.
