@@ -6,8 +6,8 @@ whole across it, how to take one, how to go back, and how to take patches to the
 HIPAA.md §11.2's document D12, for the customer's patch management (§ 164.308(a)(1)(ii)(B), (a)(5)(ii)(B)) and
 for keeping data whole while the system changes (§ 164.312(c)(1)). The design behind it is DEPLOYMENT.md,
 "Upgrading" and "Changing a stage's version", and STAGES.md §14.4a; each kit's README has a section "Changing the
-version". What the vendor commits to (how soon fixes are released, how to report a vulnerability) is D11, still
-owed.
+version". What the vendor commits to (how soon fixes are released, how to report a vulnerability) is
+[VENDOR-COMMITMENTS.md](VENDOR-COMMITMENTS.md) (D11, a draft).
 
 It describes a pipeline deployed from `deploy/reference/` and the kits' READMEs, with the `hipaa` compliance profile
 on. **A release never loses or rewrites data on its own.** Every record is stamped with the version of the stage
@@ -195,9 +195,10 @@ How quickly the vendor releases a fix is D11's.
 - **The documents said to drain a stage before changing its version.** HIPAA-OPERATIONS.md §7.1 told operators to
   drain the stage itself before an upgrade, which at the convert and transform stages leaves its new pods held
   while it is paused (§3). Corrected there.
-- **The vendor's commitments are owed** (D11): how soon a fix for a High or Critical vulnerability is released, how
-  long a release is supported, and how to report a vulnerability. The release registry and where releases are
-  published are not set up yet (DESIGN.md §14.4).
+- **The vendor's commitments are unanswered** (D11, drafted as [VENDOR-COMMITMENTS.md](VENDOR-COMMITMENTS.md)):
+  how soon a fix for a High or Critical vulnerability is released, how long a release is supported, and how to
+  report a vulnerability. The release registry and where releases are published are not set up yet (DESIGN.md
+  §14.4).
 
 ## Sources
 

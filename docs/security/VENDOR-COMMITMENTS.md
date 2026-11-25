@@ -1,0 +1,136 @@
+# The vendor's security commitments
+
+> **DRAFT, for review.** This document is not yet for customers. §1 states what the product's build and release
+> do today, each with where it is built and checked. Sections marked **For review** are commitments only the
+> vendor can make: response times, support periods, how to report a vulnerability. Each has an ID, a proposed
+> answer to start from, and is listed with the others in §4. Nothing marked for review is a commitment until it is
+> answered.
+
+For the customer's security official, for their evaluation of the product (§ 164.308(a)(8)), their protection
+from malicious software (§ 164.308(a)(5)(ii)(B)), and their supplier review. It covers what Smile Digital Health,
+the vendor, does to keep known vulnerabilities out of a release and to prove a release came from it, how security
+fixes are released and how quickly, how to report a vulnerability, and what the vendor never has: access to the
+customer's data. It is HIPAA.md §11.2's document D11 (§8.2 item 8 there). How a customer takes a release is
+[UPGRADES.md](UPGRADES.md) (D12).
+
+## 1. What every release has today
+
+### 1.1 Known vulnerabilities kept out
+
+| What | How | Where |
+|---|---|---|
+| **Base images current** | the three base images are pinned by digest in one file; a release is not signed on a base whose tag has a newer build (`scripts/base-images.sh`); Renovate opens one pull request when a pinned tag moves | DESIGN.md §14.5; `docker/base-images.env`, `renovate.json` |
+| **A vulnerability scan before signing** | grype over the SBOMs of every application jar and image, which include the OS packages and libraries bundled inside other jars; it fails on any High or Critical vulnerability with a fix available | DESIGN.md §14.5; `scripts/vuln-scan.sh` |
+| **Accepted findings written down** | an unfixable finding is accepted only by name, limited to the bundled version, with the reason it can't be reached; reviewed at each release; there is no override switch | `docker/vuln-accepted.yaml`: 9 advisories today, in copies of Jackson and Guava bundled inside Parquet and Hadoop jars |
+| **Libraries kept up** | security overrides in the parent POM where a library brings an older version, each naming which | DESIGN.md §14.5 |
+| **Small images** | the customer image is distroless: no shell, no package manager; it runs as non-root on a read-only root filesystem | DESIGN.md §14.3; [HARDENING.md](HARDENING.md) |
+
+### 1.2 Proof a release is the vendor's
+
+| What | How | Where |
+|---|---|---|
+| **Signed tarballs** | a detached ECDSA P-256 signature over each tarball, checkable with cosign or with openssl alone | DESIGN.md §14.4; each kit's README, "Verify what you received" |
+| **Signed images, by digest** | the signature stored in the registry beside the image; never by tag | DESIGN.md §14.4 |
+| **SBOMs** | CycloneDX 1.6: one of the jar's bundled components, in the kit as `legal/sbom.cdx.json`, and one of each image (OS packages and Java components), attached to it as a signed attestation an admission policy can require | DESIGN.md §14.4 |
+| **The signing key** | an EC P-256 key held in Azure Key Vault, which never leaves it; the public key, `cosign.pub`, ships with each release | DESIGN.md §14.4 |
+| **No public transparency log** | signatures aren't recorded in Sigstore's Rekor, which would publish artifact digests; the public key is the trust anchor | DESIGN.md §14.4 |
+| **Licences** | every third-party component's licence and notice in the kit and the image (`legal/`) | DESIGN.md §14.2 |
+
+`scripts/sign-release.sh` does all of §1.1 and §1.2 in one run, for the landing, split and convert stages
+(§1.4), then verifies the result as a customer would: with the public key only, a tampered tarball refused, and
+another key refused.
+
+### 1.3 What the vendor never has
+
+- **No access to the customer's data.** The product sends nothing to the vendor: telemetry and audit events go to
+  the customer's own collector and store, and there is no licence check, update check or phone-home.
+- **Support never needs PHI.** Logs, telemetry and issue text carry codes, IDs and positions, never values. The
+  support bundle (`support-bundle`) holds no PHI, and the customer reads it before sending (HIPAA-OPERATIONS.md §9).
+  So the vendor is not the customer's business associate by supporting the product (HIPAA.md §1).
+- **No access to the customer's keys.** Every key is the customer's, in their KMS ([KEYS.md](KEYS.md)).
+
+> **For review (V1): the vendor's role.** The product's owner and counsel to confirm that the vendor offers no
+> hosted service, and no support that needs access to a customer's environment, under this document. Where it
+> does (the "service" images, DESIGN.md §14.1), the vendor would be a business associate, and that offer needs a
+> document of its own.
+
+### 1.4 What it doesn't have yet
+
+- **No release has been published.** The release registry, and where tarballs, signatures and `cosign.pub` are
+  published, are not set up (DESIGN.md §14.4).
+- **The transform stage isn't in the release script.** `sign-release.sh` builds, scans, signs and verifies the
+  landing, split and convert stages; the transform stage, from its own repository, has a "Verify what you
+  received" section in its README but no release run behind it yet.
+- **Releases are built and signed on a workstation,** not in CI, so there is no build provenance attestation
+  (SLSA) yet.
+- **No static analysis or secrets scanning** of the code runs at build time.
+- **FIPS 140 is not supported** ([HARDENING.md](HARDENING.md); each kit's README): no FIPS 140-validated module is
+  used or tested.
+- **No penetration test of the product by the vendor.** Customers test their own deployments (HIPAA.md §11.1 P13);
+  a product fault a customer's test finds is the vendor's to fix.
+
+## 2. Security fixes
+
+> **For review (V2): how quickly fixes are released.** Proposed, measured from the vendor confirming the finding
+> (or from a fix existing upstream, for a third-party component):
+>
+> | Severity (CVSS v3.1 or v4.0 base, as the vendor assesses it in the product) | Fixed release |
+> |---|---|
+> | Critical (9.0–10.0) | within 7 calendar days |
+> | High (7.0–8.9) | within 14 calendar days |
+> | Medium (4.0–6.9) | in the next scheduled release, or within 90 days |
+> | Low | in a scheduled release |
+>
+> These leave the customer time inside the proposed Security Rule's windows (15 days critical, 30 high;
+> UPGRADES.md §6). Answer: *open*.
+
+> **For review (V3): which releases get fixes.** Proposed: the latest minor release of the current major version,
+> and the latest minor release of the major version before it for 12 months after a new major version. Fixes come
+> as a new patch release, never as a change to a published one. Answer: *open*.
+
+> **For review (V4): how customers are told.** Proposed: a security advisory for every fixed vulnerability of
+> Medium or above, naming the affected releases, the fixed release, the severity, and what to do meanwhile (a
+> setting, a network policy), sent to each customer's named security contact and published with the release.
+> Where a scanner would flag a component the product can't reach, a VEX statement (CycloneDX) saying so, published
+> beside the SBOMs. Answer: *open*.
+
+**Between releases,** a customer can scan a release's published SBOMs again with their own scanner: a
+vulnerability published after the release is found that way, and the vendor's own rescans of supported releases'
+SBOMs do the same (V5).
+
+> **For review (V5): rescanning.** Proposed: the vendor rescans the SBOMs of every supported release at least
+> weekly, and treats a new High or Critical finding as a report under V2. Answer: *open*.
+
+## 3. Reporting a vulnerability
+
+> **For review (V6): the reporting channel.** Proposed: a security mailbox (`security@<vendor domain>`), with a
+> PGP key or an encrypted form; a `security.txt` (RFC 9116) on the vendor's site; acknowledgement within 2 business
+> days, a first assessment within 7; coordinated disclosure, with credit if the reporter wants it. Reports must not
+> include PHI: the product never needs PHI to show a fault. Answer: *open*.
+
+> **For review (V7): a vulnerability disclosure policy.** Proposed: a published policy saying what may be tested
+> (a reporter's own deployment only, never a customer's), safe harbour for good-faith research, and the timeline
+> to public disclosure (90 days, or the fixed release, whichever is first). Answer: *open*.
+
+## 4. Open questions
+
+| ID | Question | For | Answer |
+|---|---|---|---|
+| V1 | Does the vendor offer no hosted service and no support needing access to a customer's environment, under this document? | product owner, counsel | *open* |
+| V2 | How quickly are fixes released, by severity? | product owner | *open* |
+| V3 | Which releases get fixes, and for how long? | product owner | *open* |
+| V4 | How are customers told: advisories, contacts, VEX? | product owner | *open* |
+| V5 | How often does the vendor rescan supported releases? | product owner | *open* |
+| V6 | How is a vulnerability reported, and how quickly acknowledged and assessed? | product owner | *open* |
+| V7 | Is there a published disclosure policy, with safe harbour and a disclosure timeline? | product owner, counsel | *open* |
+| V8 | Before the first release: where are releases and `cosign.pub` published, and are they built and signed in CI with provenance (DESIGN.md §14.4)? | product owner | *open* |
+| V9 | For federal buyers: will the vendor give the secure software development attestation (CISA's form, under OMB M-22-18 and M-23-16), and against which practices (NIST SP 800-218)? Its status changed in 2025 and hasn't been checked (HIPAA.md §8.4) | product owner, counsel | *open* |
+| V10 | Is FIPS 140 support planned, and when (HIPAA.md §11.1 P8)? | product owner | *open* |
+
+## Sources
+
+- **Build and release:** DESIGN.md §14.1 to §14.5; `scripts/sign-release.sh`, `scripts/vuln-scan.sh`,
+  `scripts/base-images.sh`; `docker/base-images.env`, `docker/vuln-accepted.yaml`, `renovate.json`; the parent
+  POM's security overrides and `cyclonedx-maven-plugin`.
+- **Documents:** HIPAA.md §1, §8.2 item 8, §8.4, §11.1 (P8, P13); HIPAA-OPERATIONS.md §9; each kit's README,
+  "Verify what you received"; HARDENING.md; KEYS.md; UPGRADES.md.

@@ -231,7 +231,8 @@ Fixing that is the CloudWatch row above, which needs the new IAM role (HIPAA.md 
 ### 2.8 Isolating pipelines
 
 Run a pipeline of its own for each covered entity an agent serves, each component of a hybrid entity
-(§ 164.105), a clearinghouse function (§ 164.308(a)(4)(ii)(A)), and Part 2 records (HIPAA.md §4.5). Give each
+(§ 164.105), a clearinghouse function (§ 164.308(a)(4)(ii)(A)), and Part 2 records (HIPAA.md §4.5;
+[security/CLEARINGHOUSE-PART2.md](security/CLEARINGHOUSE-PART2.md), D10, a draft). Give each
 pipeline its own:
 
 | Resource | Its own | Shared server, kept apart by |
