@@ -50,7 +50,7 @@ a reader or operator does with it once decrypted**. Everywhere the product store
 | The producer's source (share, bucket, queue, table) | the documents, as sent | plain, under the producer's controls | the producer | `read-write` intakes delete, move or rename an item after landing it; `read-only` intakes never change the source (DESIGN.md §5.3.1) |
 | In transit to the landing node | the documents | TLS (SFTP's SSH, SMB 3 with encryption required); HTTP push with mTLS, TLS ending at the pod, or OAuth2 | the transport, the intake's authentication (DESIGN.md §5.3.1) | — |
 | A stage's memory while it works | the item or records in hand, a batch waiting to be written, and the stage's working keys | plain | the platform: no attach, no dumps, a read-only root filesystem, the stage's own node and identity (HIPAA-OPERATIONS.md §2.9) | ends with the batch; a pod's memory with the pod |
-| Bronze: `<pipeline>_landing.landed_items` | each item as received, in 8 MiB chunks; its original name or path | AES-256-GCM per chunk, under a batch data key wrapped by the landed-items KEK (DESIGN.md §5.3.2, §7.2) | the KMS; the stage roles that may unwrap | retention (`sdh.maintenance.retention.landed-items`), purge, erasure (D9) |
+| Bronze: `<pipeline>_landing.landed_items` | each item as received, in 8 MiB chunks; its original name or path | AES-256-GCM per chunk, under a batch data key wrapped by the landed-items KEK (DESIGN.md §5.3.2, §7.2) | the KMS; the stage roles that may unwrap | retention (`sdh.maintenance.retention.landed-items`), purge, erasure ([RETENTION.md](RETENTION.md), D9) |
 | Bronze: `<pipeline>_split.split_records` | each record as cut, in its original form | encrypted as above, under the records KEK | as above | retention, purge, erasure |
 | Silver: `<pipeline>.records` | each record converted to JSON, or in its original form with the error that stopped its conversion | encrypted, under the records KEK | as above | retention, purge, erasure |
 | Gold: `<pipeline>_fhir.fhir` | each record mapped to FHIR | encrypted, under the FHIR KEK | as above; readers through `connector-queue-reader`, each read audited | retention, purge, erasure |
@@ -107,7 +107,7 @@ keys, and its short-lived cloud credentials until they expire (HIPAA-OPERATIONS.
 
 ## 5. Copies that outlast a removal
 
-What retention, a purge or an erasure doesn't reach at once, for the disposal procedures (D9):
+What retention, a purge or an erasure doesn't reach at once, for the disposal procedures ([RETENTION.md](RETENTION.md), D9, has each in full):
 
 - **Noncurrent object versions.** The buckets keep versions, as a restore needs (HIPAA-OPERATIONS.md §7). The
   files a purge rewrites or a retention run deletes stay as noncurrent versions until the lifecycle rule expires

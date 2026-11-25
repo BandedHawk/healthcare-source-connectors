@@ -609,7 +609,7 @@ The outstanding work is restated, with what's decided since, in §11.
 Items 1, 4 (the break-glass part) and 6 are now in §10 and [HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md), item 2
 in [security/CONFIGURATION.md](security/CONFIGURATION.md), item 3 in
 [security/AUDIT-EVENTS.md](security/AUDIT-EVENTS.md) and item 5 in [security/DATA-FLOWS.md](security/DATA-FLOWS.md);
-the others are still owed.
+item 6 is completed by [security/RETENTION.md](security/RETENTION.md). The others are still owed.
 
 1. **A HIPAA shared-responsibility matrix.** This is §3–§5 restated per specification: met by the product,
    capability the operator configures, or the operator's alone.
@@ -838,7 +838,7 @@ the audit store wiring (§2.7 there), pipeline isolation (§2.8 there), and the 
 | D6 | **Security configuration guide** | §8.2 item 2: every setting that bears on HIPAA, its safe value and what it does, starting from `deploy/reference/`. **Written 2026-11-25:** [security/CONFIGURATION.md](security/CONFIGURATION.md); `ConfigurationGuideTest` checks it names every compliance check. |
 | D7 | **Audit event catalogue** | §8.2 item 3: every event and field, for the SIEM and the activity reviews. **Written 2026-11-25:** [security/AUDIT-EVENTS.md](security/AUDIT-EVENTS.md); `AuditEventsCatalogueTest` checks it lists every event the code emits and every control API operation. Found: the OTLP export carries no chain ID (HIPAA-OPERATIONS.md §3.2 corrected), and events before the journal opens are capped at 1,000. |
 | D8 | **Backup, restore and disaster recovery** | §8.2 item 4, from P7: what to back up, how often, how to restore, the RTO and RPO it gives. **Written 2026-11-24:** HIPAA-OPERATIONS.md §7; the RTO at size awaits the drill (§11.4, A3). |
-| D9 | **Retention and destruction** | §8.2 item 6, completed with P4: what each removal deletes and what it leaves (backups, logs). |
+| D9 | **Retention and destruction** | §8.2 item 6, completed with P4: what each removal deletes and what it leaves (backups, logs). **Written 2026-11-25:** [security/RETENTION.md](security/RETENTION.md); `RetentionGuideTest` checks it names every retention setting with its default, every command a data or audit admin runs, and every claim of the erasure certificate. Found: nothing is removed unless the customer sets it (`deploy/reference/` sets no retention or bounds, and the profile requires none), a purge is asked stage by stage, a purge leaves the item's failures and ledger entry, an erasure certificate names only the KEKs in use at the erasure, no harness scenario waits for retention to delete rows, and no cryptographic erase has been rehearsed (§8 there). CONFIGURATION.md §8's retention row for convert and transform corrected. |
 | D10 | **The clearinghouse question and Part 2** | §8.2 item 7: when X12 conversion may make the operator a clearinghouse; how to keep Part 2 records apart (§2.8 there, P9). |
 | D11 | **The vendor's security commitments** | §8.2 item 8: vulnerability scanning, how quickly fixes are released, signed images and SBOMs, how to report a vulnerability. |
 | D12 | **Upgrades and patching** | How to take a release and its fixes without losing data (DEPLOYMENT.md, "Upgrading"), and how quickly. |

@@ -112,16 +112,17 @@ network only, never from the internet (D1).
 
 ## 8. Retention
 
-How each removal works, and what it leaves, is D9; the settings, each unset by default (kept for ever):
+How each removal works, and what it leaves, is [RETENTION.md](RETENTION.md) (D9); the settings, each unset by default (kept for ever):
 
 | Setting | What it removes |
 |---|---|
 | `sdh.maintenance.retention.landed-items` | bronze items, whole days, at least 7 days old (DESIGN.md §5.3.13) |
-| `sdh.maintenance.retention.records` | a stage's records table |
+| `sdh.maintenance.retention.records` | the split stage's `split_records` |
+| `sdh.maintenance.retention` | the convert and transform stages' tables: silver `records`, gold `fhir` |
 | `sdh.maintenance.retention.given-up` | the chunks of items given up part way, after a grace period |
 | `sdh.stage.retention.after` | registry rows of finished items with no open failure, never data, the ledger, failures or the journal (DEPLOYMENT.md "Registry retention") |
 
-Set them from the customer's records-management policy, and set the control API's retention bounds (§6) to match.
+Set them on every stage, from the customer's records-management policy, and set the control API's retention bounds (§6) to match.
 `sdh.maintenance.enabled` (on by default) must stay on for any of them to run.
 
 ## 9. Outside the stages

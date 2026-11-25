@@ -743,6 +743,9 @@ Then:
 
 ## 8. Retention, disposal and end of contract (§ 164.310(d), § 164.504(e)(2)(ii)(J))
 
+What each removal deletes, what it leaves (versions, backups, topics, delivered copies) and how destroying the
+keys ends the rest is [security/RETENTION.md](security/RETENTION.md) (D9); the steps are here.
+
 - **Retention** is off by default; each table keeps rows forever until a period is set (DESIGN §8.4, §5.3.13). The
   security official sets it from state law and contracts. Retention deletes whole days and their files, audited.
   - Before real PHI, set the bounds a law or contract allows on every stage:
