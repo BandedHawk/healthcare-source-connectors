@@ -547,7 +547,7 @@ check after it.
 |---|---|---|---|
 | The catalog, registries, leases, control state, operators' sealing keys and the audit journal | The pipeline's Postgres database | Point-in-time recovery: WAL archiving, or the cloud database's own (RDS, Cloud SQL, Azure Flexible Server) | Your recovery window: 7 to 35 days |
 | Every table's data, manifests and metadata: bronze above all, since once an item has landed it is the only copy | The object store | **Versioning on** for every bucket, with noncurrent versions kept at least as long as the database's window; object lock against deletion; replication to another region for a region's loss | At least the database's window |
-| KEKs, signing and ID keys | The KMS | Never deleted while any backup needs them; multi-region keys for a region's loss | As long as any backup encrypted under them |
+| KEKs, signing and ID keys | The KMS, or Vault's storage | Never deleted while any backup needs them; multi-region keys for a region's loss; Vault: snapshots off the cluster (below, "Self-hosted stores") | As long as any backup encrypted under them |
 | The stage's settings and secrets, and the deployment's manifests | Your configuration management | Yours | |
 | Exported audit events | Your audit store (§2.7) | Yours | Six years |
 
@@ -680,6 +680,90 @@ pipeline's catching up; it has not yet been measured at size.
 
 **Test a restore once a year,** and after each upgrade that changes a table or the registries, and record the
 result. `scripts/harness.sh testcontainers restore` runs the steps above on a throwaway pipeline.
+
+### Self-hosted stores
+
+The steps above assume a cloud's managed services, which do most of the backing up. Where the pipeline runs on
+stores you operate yourself (on premises, or your own clusters in a cloud), the same three things must be
+recoverable, and recoverable together: the object store, the database, and the keys. Losing any one of them loses
+the pipeline. What follows is guidance, not a tested procedure: the product's restore has been run on the
+sandbox's SeaweedFS, Postgres and Vault (DESIGN.md §18, revision (fl)), but not their backups to another site.
+Choose your own tools; the ones named are examples.
+
+**The object store (SeaweedFS, the only S3-compatible store the product is tested with).**
+- **Turn versioning on in every pipeline bucket** before the pipeline writes to it, with S3 `PutBucketVersioning`
+  through SeaweedFS's S3 gateway. Under the `hipaa` profile the stages refuse a bucket that doesn't keep versions
+  (`store-versioning`, step 3 above), and the repair (step 5) brings files back from versions through the S3
+  API, as on S3.
+- **Object Lock can only be turned on when the bucket is made** (it turns versioning on with it). Decide before
+  the first write; an existing bucket's data must be copied to a new one to get it.
+- **Plan the expiry of noncurrent versions** as above: SeaweedFS stores every version a compaction or snapshot
+  expiry deletes until a lifecycle rule or your own job removes it. Check what your SeaweedFS version's lifecycle
+  rules support before relying on them.
+- **Replication within a cluster is not a backup.** Volume replication (for example `-defaultReplication=010`,
+  a copy on another rack) survives a lost disk or server; a delete, an overwrite or a lost site reaches every
+  copy.
+- **Copy to another site** with `weed filer.backup` (continuous, to another SeaweedFS or a cloud bucket) or
+  `weed filer.sync` (active-passive to a second cluster). **Test whether the copy keeps versions, delete markers
+  and locks:** their documentation doesn't say, and a copy that keeps only the current objects can't restore a
+  file the catalog still names after a delete.
+- **Run it with durable writes.** With its defaults SeaweedFS can lose its last acknowledged writes in a host
+  crash, while Postgres keeps them, so the catalog can name files the store no longer has (SANDBOX.md, "Object
+  storage can lose its last writes"). Use replicated volumes on disks that survive a power loss, and run the
+  check (step 4 above) after any crash of the store's hosts.
+
+**The database (Postgres you run).**
+- **Point-in-time recovery needs two things:** regular base backups (daily or weekly) and every WAL segment since,
+  archived as it fills. pgBackRest, Barman and WAL-G do both; on Kubernetes, an operator such as CloudNativePG
+  runs one of them for you.
+- **Keep the archive in another failure domain:** another site or a cloud bucket, never the database's own disk or
+  cluster, and write-once where the target allows (as above, under "Protecting the backups").
+- **Watch it:** alert when the archive falls behind (`pg_stat_archiver`'s `failed_count`, the age of
+  `last_archived_time`) or a base backup is missed; a gap in the WAL ends the window at the gap. Check each
+  backup with the tool's own verify (`pgbackrest verify`, `barman check`).
+- **A streaming replica is not a backup:** it takes a dropped table or a bad migration within a second. It
+  shortens the outage when a server is lost; the archive is what restores to an earlier point.
+- **Restore the whole database to one time T,** as step 2 above: the catalog, the registries and the leases are
+  in one database so that they agree, and a restore of some of them alone breaks that.
+
+**The keys (Vault Transit).**
+- **Vault's storage holds every KEK and signing key.** Lose it and every landed item, every record and every
+  backup of them can't be decrypted again (the last row of "Other losses"). It needs a backup as much as the data
+  does, and to be restorable at the second site before the data is any use there.
+- **Take snapshots off the cluster:** `vault operator raft snapshot save` with integrated storage, on a schedule
+  (Vault Enterprise can schedule them itself, to a cloud bucket or a local path), kept in another site and
+  write-once where the target allows. The snapshot is encrypted by Vault's own keys, but treat it as
+  sensitive. Back up the server's configuration with it, and keep any token or TLS key in that configuration
+  as a secret.
+- **The unseal (or recovery) keys** are what open a restored Vault. Give the shares to named custodians, keep
+  them apart from the snapshots, and record who holds each. A snapshot without them, or an auto-unseal KMS key
+  that has been deleted, can't be opened.
+- **Keep snapshots as long as any backup encrypted under their keys:** Transit keys deleted later are still in
+  older snapshots. That is what makes a restore possible, and why destroying a key means destroying those
+  snapshots too ([security/RETENTION.md](security/RETENTION.md) §4).
+- **Test a restore** to a new cluster (`vault operator raft snapshot restore -force`, then unseal), and check that
+  a stage can unwrap with the restored keys. Snapshots don't replace a highly available cluster; Vault
+  Enterprise's disaster-recovery replication is the alternative to restoring from them.
+- With another KMS, its own backup and replication apply; a hardware security module's keys need its
+  vendor's backup procedure.
+
+**Choosing the RPO and RTO.** What you can lose and how long you can be down are yours to set, in the contingency
+plan; the pipeline decides what each costs.
+- **The RPO** for a lost database is nothing landed ("What it gives", above), whatever the restore point. For
+  a lost site it is the longest lag of the copies to the other site: the store's (`filer.backup` or
+  `filer.sync`), the WAL archive's (`archive_timeout` bounds a quiet database's), and the key snapshots'
+  interval. A key made or rotated since the last snapshot is lost with everything under it, so take a snapshot
+  after each rotation.
+- **The RTO** is the time to bring the store, the database and Vault up at the site, then the restore of steps 1
+  to 10: the database's replay of WAL since its base backup, each stage's check (a walk of every table's files),
+  and the pipeline's catching up. None of these has been measured at size (DESIGN.md §18.8; HIPAA.md §11.4, A3):
+  time your own drill and set the RTO from it.
+
+**A second site.** Keep at least three copies, on two kinds of media or systems, one of them off site (the
+"3-2-1" rule), for each of the three. The second site needs all of them from about the same time: the store's
+copy, a base backup and the WAL since it, and a Vault snapshot no older than the newest key. Bring Vault back
+first, then the store and the database, then steps 1 to 10. Rehearse it at least once a year, as above, and
+record what it took.
 
 ### 7.1 Pausing and draining a stage (§ 164.308(a)(7)(ii)(C))
 

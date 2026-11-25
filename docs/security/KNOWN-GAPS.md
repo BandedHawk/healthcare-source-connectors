@@ -132,6 +132,7 @@ work, beyond this project ([PAYER-X12-FUTURE-WORK.md](../PAYER-X12-FUTURE-WORK.m
 | Signed-image admission, a CIS benchmark, an external secret store, Object Lock | the sandbox or the AWS session | HARDENING.md §6 |
 | A harness scenario that waits for retention to delete rows | locally | RETENTION.md §8 |
 | A cryptographic erase rehearsed: a KEK destroyed, then a restore from an older backup tried | the sandbox | RETENTION.md §8 |
+| A self-hosted site restore: SeaweedFS copied by `filer.backup` or `filer.sync` (do versions, delete markers and locks survive?), Postgres from a base backup and WAL archive, Vault from a raft snapshot with its unseal keys, then the restore steps; timed for an RTO | the sandbox, with a second SeaweedFS and Vault | HIPAA-OPERATIONS.md §7, "Self-hosted stores" |
 | The restore drill at size, and the other steps of the AWS session | the AWS session | HIPAA.md §11.4 (A1, A3, A4) |
 | The transports still untested | as each environment is prepared | HIPAA.md P11 |
 
