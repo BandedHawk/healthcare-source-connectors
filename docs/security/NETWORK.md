@@ -9,8 +9,8 @@ is [IDENTITY.md](IDENTITY.md).
 
 It describes a pipeline deployed from `deploy/reference/` and the kits' READMEs, with the `hipaa` compliance profile
 on, one pipeline to a namespace (HIPAA-OPERATIONS.md §2.8). The network policies of §4 are a starting point written
-from the ones the AWS PoC and the sandbox run (`deploy/aws/k8s/`, `deploy/sandbox/`); as written here they have not
-been applied anywhere (§9).
+from the ones the AWS PoC and the sandbox run (`deploy/aws/k8s/`, `deploy/sandbox/`); the sandbox's harness pipeline
+runs under them, but no cloud deployment has yet (§9).
 
 ## 1. The zones
 
@@ -106,98 +106,31 @@ reader's namespace the same egress and nothing more.
 
 ## 4. Network policies
 
-Apply these to each pipeline's namespace, `sdh-<pipeline>`, with the namespaces of the platform services labelled as
-below. They default to nothing, then let in and out only what §2 and §3 name. Each kit's README adds the control
-pods' own policy (CONTROL-API-DEPLOYMENT.md §2.4); the one below is the same.
+`deploy/reference/network-policies.yaml` holds them, for each pipeline's namespace, `sdh-<pipeline>`. Label that
+namespace `sdh.smiledigitalhealth.com/infra-client: "true"`, which the platform services' own policies let in
+(below). The policies default to nothing, then let in and out only what §2 and §3 name. Fill in its `${...}` values, or apply it through `envsubst` as the other reference files are.
 
-```yaml network-policies
-# Nothing in or out of the pipeline's namespace unless a policy below allows it.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: { name: default-deny, namespace: sdh-<pipeline> }
-spec:
-  podSelector: {}
-  policyTypes: [Ingress, Egress]
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: { name: to-dns, namespace: sdh-<pipeline> }
-spec:
-  podSelector: {}
-  policyTypes: [Egress]
-  egress:
-    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
-             podSelector: { matchLabels: { k8s-app: kube-dns } } }]
-      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
----
-# The platform services: Postgres or PgBouncer, the broker's TLS listener, the collector. Their own policies let in
-# only namespaces labelled sdh.smiledigitalhealth.com/infra-client, as on the PoC (deploy/aws/k8s/infra).
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: { name: to-platform, namespace: sdh-<pipeline> }
-spec:
-  podSelector: {}
-  policyTypes: [Egress]
-  egress:
-    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: <platform-namespace> } } }]
-      ports: [{ port: 5432 }, { port: 9094 }, { port: 4318 }]
----
-# The cloud's services through their private endpoints: the KMS, STS, an S3 interface endpoint, the identity
-# provider. Name the endpoints' subnets, not the internet.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: { name: to-private-endpoints, namespace: sdh-<pipeline> }
-spec:
-  podSelector: {}
-  policyTypes: [Egress]
-  egress:
-    - to: [{ ipBlock: { cidr: <endpoint-subnets-cidr> } }]
-      ports: [{ port: 443 }]
----
-# EKS Pod Identity's agent on the node. Leave it out where the provider gives identities another way.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: { name: to-pod-identity, namespace: sdh-<pipeline> }
-spec:
-  podSelector: {}
-  policyTypes: [Egress]
-  egress:
-    - to: [{ ipBlock: { cidr: 169.254.170.23/32 } }]
-      ports: [{ port: 80 }]
----
-# The landing node's producer source, for a polled intake: here an SFTP server. One rule per source.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: { name: landing-to-source, namespace: sdh-<pipeline> }
-spec:
-  podSelector: { matchLabels: { app: landing-<intake> } }
-  policyTypes: [Egress]
-  egress:
-    - to: [{ ipBlock: { cidr: <source-cidr> } }]
-      ports: [{ port: 22 }]
----
-# The push load balancer to the landing node, for an HTTP push intake only.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: { name: push-to-landing, namespace: sdh-<pipeline> }
-spec:
-  podSelector: { matchLabels: { app: landing-<intake> } }
-  policyTypes: [Ingress]
-  ingress:
-    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: <push-ingress-namespace> } } }]
-      ports: [{ port: 8443 }]
----
-# The control ingress to each stage's control pods: one per stage, as each kit's README has it.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: { name: sdh-control-convert, namespace: sdh-<pipeline> }
-spec:
-  podSelector: { matchLabels: { app: sdh-control-convert } }
-  policyTypes: [Ingress]
-  ingress:
-    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: <ingress-namespace> } } }]
-      ports: [{ port: 8443 }]
-```
+| Policy | Pods | Lets |
+|---|---|---|
+| `default-deny` | all | nothing in or out, unless another policy allows it |
+| `to-dns` | all | out to the cluster's DNS, 53 UDP and TCP |
+| `to-platform` | all | out to the platform services' namespace: Postgres or PgBouncer (5432), the broker's TLS listener (9094 here), the collector (4318) |
+| `to-private-endpoints` | all | out to the private endpoints' subnets on 443: the KMS, STS, the object store, the identity provider |
+| `to-pod-identity` | all | out to EKS Pod Identity's agent on the node, `169.254.170.23` port 80; left out elsewhere |
+| `landing-to-source` | the landing node | out to a polled intake's source (22 for SFTP here); one rule per source |
+| `push-to-landing` | the landing node | in from the push load balancer's namespace on 8443, for an HTTP push intake only |
+| `control-from-ingress` | the control pods | in from the control ingress's namespace on 8443, as each kit's own policy (CONTROL-API-DEPLOYMENT.md §2.4) |
+
+The sandbox's harness pipeline runs under this file (`scripts/sandbox.sh harness-up`), with the sandbox's own
+services in place of the cloud's: SeaweedFS (8333) and Vault (8200) in its platform namespace, the broker on 9092,
+no private endpoints and no Pod Identity, its landing node `app: landing`, and pushes from `sdh-producers`. Checked
+there on 2026-11-25, from a throwaway pod in each namespace: from the pipeline's namespace Postgres, the broker,
+SeaweedFS, Vault and the collector were open, and the broker's other listener (9093), Grafana (3000), the internet
+(1.1.1.1:443) and the namespace's own landing and control ports closed; from `sdh-producers` the landing node's 8443
+was open and the control API's closed; from another pipeline's namespace both were closed. Under them, ten of the
+control harness's eleven scenarios (`scripts/harness.sh sandbox`) passed, the kubelet's probes and the kits' control
+policies included; `erasure` failed once on a race in `audit-verify`, not the network (DESIGN.md revision (fm)),
+and passed when rerun.
 
 - **With an S3 gateway endpoint** instead of an interface one, S3's addresses are public ones, which a
   NetworkPolicy can't name by prefix list. The PoC allows 443 to every address outside the private ranges
@@ -269,9 +202,9 @@ or a producer. It records:
 
 ## 9. Findings
 
-- **`deploy/reference/` has no network policies.** The ones that have run are the AWS PoC's
-  (`deploy/aws/k8s/pipeline/namespace.yaml`, `infra/namespace.yaml`), the sandbox's and the kits' control policies.
-  §4's set, one namespace per pipeline with private endpoints named, follows them but hasn't been applied anywhere.
+- **§4's policies have run only on the sandbox,** on its harness pipeline (§4), not on a cloud deployment: the
+  private endpoints, Pod Identity and the broker's TLS listener rules are untried, and the sandbox's other pipelines
+  still run under their own policies (`deploy/sandbox/*/namespace.yaml`).
 - **The AWS PoC is not this architecture:** it runs in the default VPC's public subnets, reaches the KMS by its
   public endpoint, and lets the stages reach 443 on every public address (AWS-POC.md; HIPAA.md §8.5). It holds no
   PHI and needs none of it until it does.
@@ -291,7 +224,7 @@ or a producer. It records:
 | No listener on a worker, the control API a Deployment of its own, telemetry pushed | each kit's README, "Deploy on Kubernetes" and "Control API"; CONTROL-API-DESIGN.md §1; `connector-runtime` `telemetry/TelemetryConfiguration` |
 | The connections and their TLS | `deploy/reference/` and its README; DEPLOYMENT.md, "Transports: what has been tested"; DATA-FLOWS.md §1 |
 | The intakes and their protocols | DESIGN.md §5.3.1, §5.3.14–§5.3.18 |
-| The policies that have run | `deploy/aws/k8s/pipeline/namespace.yaml`, `deploy/aws/k8s/infra/namespace.yaml`, `deploy/sandbox/*/namespace.yaml`; the kits' control policies |
+| The policies that have run | `deploy/reference/network-policies.yaml` (on the sandbox's harness pipeline: `scripts/sandbox.sh`, `reference_policies`); `deploy/aws/k8s/pipeline/namespace.yaml`, `deploy/aws/k8s/infra/namespace.yaml`, `deploy/sandbox/*/namespace.yaml`; the kits' control policies |
 | The CNIs | `deploy/aws/terraform/compute/main.tf` (`enableNetworkPolicy`); `scripts/sandbox.sh` (`--cni=calico`) |
 | Port-forwards past the policies | `scripts/sandbox.sh` (the harness's port-forwards); CONTROL-API-DESIGN.md §15.11, §15.12 |
 | The PoC's network | AWS-POC.md (networking, §8.2) |

@@ -1,0 +1,98 @@
+# A pipeline's network policies (docs/security/NETWORK.md §4): nothing in or out of its namespace, sdh-${PIPELINE},
+# but what a stage needs. Fill in the ${...} values, or with envsubst:
+#   ${PIPELINE}                the pipeline's name
+#   ${PLATFORM_NAMESPACE}      the namespace of Postgres or PgBouncer, the broker and the collector
+#   ${ENDPOINT_CIDR}           the subnets of the cloud's private endpoints (KMS, STS, the object store)
+#   ${INTAKE}                  the landing node's intake (its pods are app: landing-${INTAKE})
+#   ${SOURCE_CIDR}             a polled intake's source
+#   ${PUSH_INGRESS_NAMESPACE}  the push load balancer's or ingress's namespace, for an HTTP push intake
+#   ${INGRESS_NAMESPACE}       the control ingress's namespace
+# Change the ports to your own: the broker's TLS listener (9094 here) and the source's (22, SFTP, here). Leave out
+# landing-to-source for a push intake, push-to-landing for a polled one, and to-pod-identity off EKS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny, namespace: "sdh-${PIPELINE}" }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: to-dns, namespace: "sdh-${PIPELINE}" }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
+             podSelector: { matchLabels: { k8s-app: kube-dns } } }]
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+---
+# The platform services: Postgres or PgBouncer, the broker's TLS listener, the collector. Their own policies let in
+# only namespaces labelled sdh.smiledigitalhealth.com/infra-client, as on the AWS PoC (deploy/aws/k8s/infra).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: to-platform, namespace: "sdh-${PIPELINE}" }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: "${PLATFORM_NAMESPACE}" } } }]
+      ports: [{ port: 5432 }, { port: 9094 }, { port: 4318 }]
+---
+# The cloud's services through their private endpoints: the KMS, STS, an S3 interface endpoint, the identity
+# provider. Name the endpoints' subnets, not the internet.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: to-private-endpoints, namespace: "sdh-${PIPELINE}" }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ ipBlock: { cidr: "${ENDPOINT_CIDR}" } }]
+      ports: [{ port: 443 }]
+---
+# EKS Pod Identity's agent on the node. Leave it out where the provider gives identities another way.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: to-pod-identity, namespace: "sdh-${PIPELINE}" }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ ipBlock: { cidr: 169.254.170.23/32 } }]
+      ports: [{ port: 80 }]
+---
+# The landing node's producer source, for a polled intake: here an SFTP server. One rule per source.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: landing-to-source, namespace: "sdh-${PIPELINE}" }
+spec:
+  podSelector: { matchLabels: { app: "landing-${INTAKE}" } }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ ipBlock: { cidr: "${SOURCE_CIDR}" } }]
+      ports: [{ port: 22 }]
+---
+# The push load balancer to the landing node, for an HTTP push intake only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: push-to-landing, namespace: "sdh-${PIPELINE}" }
+spec:
+  podSelector: { matchLabels: { app: "landing-${INTAKE}" } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: "${PUSH_INGRESS_NAMESPACE}" } } }]
+      ports: [{ port: 8443 }]
+---
+# The control ingress to each stage's control pods, as each kit's README has it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: control-from-ingress, namespace: "sdh-${PIPELINE}" }
+spec:
+  podSelector:
+    matchExpressions: [{ key: app, operator: In,
+                         values: [sdh-control-landing, sdh-control-split, sdh-control-convert, sdh-control-transform] }]
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: "${INGRESS_NAMESPACE}" } } }]
+      ports: [{ port: 8443 }]

@@ -29,9 +29,10 @@ import org.yaml.snakeyaml.Yaml;
 /**
  * The reference network architecture ({@code docs/security/NETWORK.md},
  * HIPAA.md §11.2 D1) names every port a stage listens on or connects to by
- * setting, and its network policies let in only those it listens on, so a
- * port added to the settings can't be left out of what the network
- * administrator opens.
+ * setting, and the reference network policies it describes
+ * ({@code deploy/reference/network-policies.yaml}) let in only those it
+ * listens on, so a port added to the settings can't be left out of what the
+ * network administrator opens.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -43,8 +44,9 @@ class NetworkGuideTest
     private static final Path ROOT = Path.of("").toAbsolutePath()
             .getParent();
 
-    /** The fence that opens §4's network policies. */
-    private static final String POLICIES = "```yaml network-policies\n";
+    /** The reference network policies. */
+    private static final String POLICIES =
+            "deploy/reference/network-policies.yaml";
 
     /** Creates the tests; JUnit runs each test on a new instance. */
     NetworkGuideTest()
@@ -78,20 +80,17 @@ class NetworkGuideTest
     }
 
     /**
-     * §4's policies are network policies, start with one that denies
-     * everything, and let traffic in only on a port §2 says a stage listens
-     * on.
+     * The reference policies are network policies, each a row of §4's
+     * table; they start with one that denies everything, and let traffic in
+     * only on a port §2 says a stage listens on.
      *
-     * @throws IOException if the document can't be read
+     * @throws IOException if the document or the policies can't be read
      */
     @Test
     void policiesLetInOnlyTheListeners() throws IOException
     {
         String guide = guide();
-        int start = guide.indexOf(POLICIES);
-        assertThat(start).as("§4's policies").isPositive();
-        int end = guide.indexOf("\n```", start + POLICIES.length());
-        String yaml = guide.substring(start + POLICIES.length(), end);
+        String yaml = Files.readString(ROOT.resolve(POLICIES));
         List<Map<String, Object>> policies = new ArrayList<>();
         for (Object document : new Yaml().loadAll(yaml))
         {
@@ -100,6 +99,18 @@ class NetworkGuideTest
         assertThat(policies).as("policies").isNotEmpty()
                 .allSatisfy(policy -> assertThat(policy.get("kind"))
                         .isEqualTo("NetworkPolicy"));
+        String table = guide.substring(guide.indexOf("## 4."),
+                guide.indexOf("## 5."));
+        Set<String> unlisted = new TreeSet<>();
+        for (Map<String, Object> policy : policies)
+        {
+            String name = (String) map(policy.get("metadata")).get("name");
+            if (!table.contains("\n| `" + name + "` |"))
+            {
+                unlisted.add(name);
+            }
+        }
+        assertThat(unlisted).as("policies §4's table leaves out").isEmpty();
         Map<String, Object> first = map(policies.get(0).get("spec"));
         assertThat(map(first.get("podSelector"))).as("default-deny's pods")
                 .isEmpty();

@@ -27,6 +27,8 @@ performance pipelines follow them too (the hipaa profile, Kafka over SASL_SSL, P
 - `postgres.sql`: the pipeline's database, its catalog role, and a login role per stage that acts as it. Only the
   pipeline's stages may connect.
 - `kafka-acls.sh`: each stage's rights on the broker (DEPLOYMENT.md, "Broker rights"), for the broker team to apply.
+- `network-policies.yaml`: the pipeline namespace's network policies, default-deny and then only what a stage needs
+  (security/NETWORK.md §4).
 
 The Deployments are those in each stage's distribution README, as the sandbox and AWS use them. They mount
 the settings at `/config` and the keys at `/run/secrets`; put the CA certificates in the keys' Secret.

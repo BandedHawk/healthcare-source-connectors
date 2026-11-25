@@ -11,6 +11,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.nimbusds.jose.crypto.ECDSASigner;
 import com.sdh.healthcare.connector.core.TestPostgres;
 import com.sdh.healthcare.connector.core.telemetry.AuditJournal;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.interfaces.ECPrivateKey;
@@ -270,6 +273,80 @@ class JdbcAuditJournalTest
         assertThat(later.chains().getFirst().problems())
                 .extracting(AuditTrail.Problem::kind)
                 .contains(AuditTrail.Kind.UNCLOSED);
+    }
+
+    /**
+     * Entries written while a chain is being checked, after its head row
+     * was read, aren't taken for a change: the check reads one snapshot.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void checksAChainBeingWrittenAsOfOneMoment() throws Exception
+    {
+        try (JdbcAuditJournal journal = newJournal(true))
+        {
+            append(journal, 3);
+            journal.flush();
+            String entries = "FROM " + tables.events();
+            DataSource racing = (DataSource) Proxy.newProxyInstance(
+                    getClass().getClassLoader(),
+                    new Class<?>[] {DataSource.class},
+                    (source, method, arguments) ->
+                    {
+                        Object result = invoke(method, dataSource, arguments);
+                        if (!(result instanceof Connection connection))
+                        {
+                            return result;
+                        }
+                        return Proxy.newProxyInstance(
+                                getClass().getClassLoader(),
+                                new Class<?>[] {Connection.class},
+                                (proxy, call, values) ->
+                                {
+                                    if (call.getName()
+                                            .equals("prepareStatement")
+                                            && values[0].toString()
+                                                    .contains(entries))
+                                    {
+                                        append(journal, 2);
+                                        journal.flush();
+                                    }
+                                    return invoke(call, connection, values);
+                                });
+                    });
+
+            AuditTrail.Verification verification = new AuditTrail(racing,
+                    tables, Duration.ofSeconds(10)).verify(null, null,
+                            key(stageKey), Instant.now(), STALE);
+
+            assertThat(verification.intact()).isTrue();
+            assertThat(verification.chains().getFirst().entries())
+                    .isEqualTo(3);
+        }
+        assertThat(verify().chains().getFirst().entries()).isEqualTo(5);
+    }
+
+    /**
+     * Calls a method of the object a proxy stands in for.
+     *
+     * @param method    the method
+     * @param target    the object
+     * @param arguments its arguments
+     * @return what it returned
+     * @throws Throwable what it threw
+     */
+    private static Object invoke(Method method, Object target,
+            Object[] arguments) throws Throwable
+    {
+        try
+        {
+            return method.invoke(target, arguments);
+        }
+        catch (InvocationTargetException failure)
+        {
+            throw failure.getCause();
+        }
     }
 
     /**

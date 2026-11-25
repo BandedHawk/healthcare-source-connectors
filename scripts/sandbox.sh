@@ -727,6 +727,24 @@ deploy_producer() {
     --dry-run=client -o yaml | kc apply -f - >/dev/null
 }
 
+# reference_policies <pipeline>: the pipeline's namespace held to the reference network policies
+# (deploy/reference/network-policies.yaml, docs/security/NETWORK.md §4) in place of the sandbox's own, with the
+# sandbox's services in place of the cloud's: SeaweedFS (8333) and Vault (8200) beside Postgres, Kafka on 9092 and
+# the collector in sdh-infra; no private endpoints or source to reach (a documentation range, 192.0.2.0/24); the
+# landing node app: landing, pushed to from sdh-producers; the control APIs let in from sdh-ingress.
+reference_policies() {
+  local n
+  n="$(ns "$1")"
+  sed -e 's/"landing-${INTAKE}"/landing/' \
+      -e 's/{ port: 9094 }, { port: 4318 }/{ port: 9092 }, { port: 8333 }, { port: 8200 }, { port: 4318 }/' \
+      "$ROOT/deploy/reference/network-policies.yaml" \
+    | PIPELINE="$1" PLATFORM_NAMESPACE=sdh-infra ENDPOINT_CIDR=192.0.2.0/24 SOURCE_CIDR=192.0.2.0/24 \
+      PUSH_INGRESS_NAMESPACE=sdh-producers INGRESS_NAMESPACE=sdh-ingress \
+      envsubst '$PIPELINE $PLATFORM_NAMESPACE $ENDPOINT_CIDR $SOURCE_CIDR $PUSH_INGRESS_NAMESPACE $INGRESS_NAMESPACE' \
+    | kc apply -f - >/dev/null
+  kc -n "$n" delete networkpolicy to-services producers-to-landing --ignore-not-found >/dev/null
+}
+
 # deploy_pipeline <pipeline>
 deploy_pipeline() {
   local p="$1" n work
@@ -740,6 +758,7 @@ deploy_pipeline() {
   SDH_DATABASE="$(pipeline_database "$p")"
   BRONZE_BUCKET="$(pipeline_bucket "$p" bronze)"; SILVER_BUCKET="$(pipeline_bucket "$p" silver)"
   envsubst '$PIPELINE $K8S_NS' < "$DEPLOY/pipeline/namespace.yaml" | kc apply -f - >/dev/null
+  [[ "$p" != "$HARNESS" ]] || reference_policies "$p"
 
   # Each stage's inbox key pair, which the stage before it seals its messages to, and the FHIR stage's, which the
   # convert stage seals records to.

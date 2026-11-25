@@ -12,6 +12,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -253,6 +254,7 @@ public final class AuditTrail
             connection.setAutoCommit(false);
             try
             {
+                snapshot(connection);
                 for (ChainRow chain : chains(connection, from, to))
                 {
                     reports.add(verify(connection, chain, key, now,
@@ -441,6 +443,27 @@ public final class AuditTrail
             }
         }
         return found;
+    }
+
+    /**
+     * Makes the transaction read one snapshot of the journal, read only:
+     * statement by statement, a chain still being written could show
+     * entries its head row doesn't yet, and so look changed. Set for this
+     * transaction alone, not the session, so a pooler that shares server
+     * connections between transactions (PgBouncer's transaction mode)
+     * passes it on to no one.
+     *
+     * @param connection the connection, its transaction not yet begun
+     * @throws SQLException if it can't be set
+     */
+    private void snapshot(Connection connection) throws SQLException
+    {
+        try (Statement statement = connection.createStatement())
+        {
+            statement.setQueryTimeout(timeout);
+            statement.execute("SET TRANSACTION ISOLATION LEVEL"
+                    + " REPEATABLE READ, READ ONLY");
+        }
     }
 
     /**
