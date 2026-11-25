@@ -1550,6 +1550,8 @@ of that feed's batch sizes:
   of Postgres volume and 370 GiB of broker disk a copy (DEPLOYMENT.md, "Sizing Postgres and Kafka").
 - **Every format other than C-CDA** (`x12`, `edifact`, `csv`, `delimited`, generic `xml`, `fhir`, `parquet`) is
   untested end to end and at load, and has no mapping set: DEPLOYMENT.md, "Formats: what has been tested".
+- **Postgres as the pace:** when it could become the limit, what to watch, and the remedies (a database per
+  pipeline, and why not per stage yet) are in DEPLOYMENT.md, "Postgres under load".
 
 ## 12. Decided with the user, 2026-11-13
 

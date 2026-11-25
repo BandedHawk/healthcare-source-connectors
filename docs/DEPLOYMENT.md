@@ -117,11 +117,62 @@ What changes it:
   about as much as a large one.
 - **The audit journal** is kept in each stage's schema until exported and pruned (HIPAA-OPERATIONS.md §3.3); a
   pruning schedule keeps it to the export window.
-- **What the registries keep per record, and for how long, is not yet decided** (PERFORMANCE.md §10, run 53): a
-  retention on registry rows would bound Postgres; until then it grows for good.
+- **Registry rows are kept for good by default;** a retention ("Registry retention", below) bounds them to a
+  window after each item completes.
 - **The landing node's ledger index** takes 36 to 72 bytes an item, kept for good (in the figures above).
 - **The object store** (bronze, silver, gold) is not covered here; it grows with the documents' own size, several
   times over across the layers.
+
+## Postgres under load: when it could set the pace, and what to do
+
+Written 2026-11-25. **On the AWS PoC Postgres is not the limit.** In runs M, N and O (59.4 documents a second
+end to end; [PERFORMANCE.md](PERFORMANCE.md) §13.3) it used 0.4 cores on average and 1.3 at most, of its node's 2.
+PgBouncer's clients waited at most 0.23 ms on average for a server connection, and its busiest waits were row
+locks and WAL flushes, under one backend of each on average. It was the limit earlier (runs 60 to 63, short of
+CPU; before that a 512 MiB Postgres), and these took it off the path: group commit in every stage, registry
+statements gathered a batch at a time (STAGES.md §18), the audit journal's 100 ms linger (its 30% more CPU an
+item gone), PgBouncer, and the pool setting above.
+
+**Where it could set the pace:**
+- **Many records an item** (an X12 batch, a large CSV): the registries' work goes with records, not documents,
+  and has not been run at load (PERFORMANCE.md §11.1). The likeliest way for Postgres to become the limit.
+- **A faster pipeline:** its CPU and WAL go with items a second (about 16 transactions an item at split, with the
+  journal's), so 100 to 120 documents a second would need about 2.5 cores at peak, by extrapolation.
+- **Size over a long load:** at 14.8 KB a document (above), large registry tables make vacuum and index upkeep
+  slower, and retention's deletes compete with the load. No soak of a day or more has been run.
+- **Rows many pods update:** each table's catalog row, changed by every commit, and the registries' row locks.
+  The shared commit queue keeps catalog commits to a few a second a table (PERFORMANCE.md §3.7).
+
+**What to watch:** Postgres's CPU and its WAL write rate; waits by event (`pg_stat_activity`: `Lock`,
+`WALWrite`, `WALSync`); PgBouncer's client wait; each stage's `pool_wait` step; dead rows and vacuum's progress
+on the registry tables (`pg_stat_user_tables`); and the volume's free space (HIPAA-OPERATIONS.md §7.2).
+
+**What to do, cheapest first:**
+1. **A bigger server, tuned for writes:** more cores; fast storage for the WAL; `wal_compression`; a larger
+   `max_wal_size`; `commit_delay` to flush several commits at once; autovacuum set per table on the registries.
+   **Keep `synchronous_commit` on:** an acknowledged write lost in a crash would break the rule that nothing landed
+   is lost.
+2. **A managed database built for writes**, such as Aurora PostgreSQL. The stages' SQL is kept portable
+   (PERFORMANCE.md §8), but only Postgres has been measured.
+3. **Registry retention** (below) keeps the tables to a window rather than for good.
+4. **A database per pipeline, each on the server that suits it (supported now).** Each pipeline has its own
+   database (`sdh_<pipeline>`) and its own connection settings, so pipelines can be spread over several servers.
+   A large feed can be split into several intakes (by source system, say), each its own pipeline and database,
+   with the gold readers reading them all. The cost: duplicates are found within a pipeline only, so the same
+   document sent to two intakes is stored twice.
+5. **A database per stage within one pipeline (not supported).** The settings would let each stage name another
+   server, but two things rely on one database: the restore, whose single point in time gives the catalog,
+   registries, leases and journal one consistent moment (DESIGN.md §18.2); and the resending of lost item ends,
+   where a stage reads the next stage's registry (STAGES.md §13, revision (do)). Supporting it needs that read
+   made a message or a call, and a restore of each server to the same time, tried with crashes and a restore. A
+   product change, for when one pipeline outgrows one server (security/KNOWN-GAPS.md §5).
+
+Of little help: read replicas, since the busy path is writes; a distributed Postgres (Citus), since a database
+per pipeline gives most of what it would, more simply.
+
+**For the targets** (60 documents a second, 15 million documents; PERFORMANCE.md §1), one well-sized Postgres a
+pipeline is enough, by the runs above. Before a buyer's load, measure a feed with many records an item and a soak
+of a day or two; spread a larger buyer over several pipelines next.
 
 ## Formats: what has been tested
 
