@@ -46,6 +46,9 @@ changed. The questions are in [CLEARINGHOUSE-PART2.md](CLEARINGHOUSE-PART2.md) �
 | The 2026 Privacy Rule changes (91 FR 74848, compliance by 2027-07-19), reviewed in HIPAA.md §4.7: whether a health plan's gold is an "electronic health record" for the right to direct a copy (§ 164.524(d)) | counsel | HIPAA.md §4.7 |
 | Business associate contracts to revise for the 2026 Privacy Rule, by renewal on or after 2027-07-19 or by 2028-01-18 at the latest, the managed service's among them; under a managed service, whether the vendor sends copies to individuals directly (§ 164.502(a)(4)(ii)) | the operator's counsel; the managed service agreements | HIPAA.md §4.7 |
 | Still unchecked against primary sources: the Security Rule NPRM's proposals beyond patching, *Purl v. HHS*, HHS's cloud computing guidance | a check, then counsel | HIPAA.md §9 |
+| Health insurers' standing to convert their own claims, agents in front of or behind the plan, Part 2 in claims, X12 scope, and the vendor's licences (X12 commercial, CPT, NUBC, NCPDP, 3M) | Q1–Q6, counsel and the product's owner | PAYER-DATA-EXCHANGE.md §8 |
+| Vendor commitments for payer data: IG versions kept current, mapping defects fixed as High | V11–V12, the product's owner | PAYER-DATA-EXCHANGE.md §4.3 |
+| CMS's proposed rule (91 FR 19890): CARIN Blue Button and PDex required from 2027-10-01, FHIR a HIPAA standard for prior authorization | a final rule | PAYER-DATA-EXCHANGE.md §2.3 |
 | Buyers' requirements beside HIPAA (NIST SP 800-53, MARS-E, IRS Publication 1075) | a buyer naming them | HIPAA.md §8.4, §11.3 |
 
 ## 3. Waiting on the production build pipeline
@@ -82,6 +85,7 @@ product, so each needs a counterpart, or a change, for a managed service.
 | FedRAMP, for a managed service offered to federal agencies; and an SBOM of the runtime production environment, which OMB M-26-05 lets agencies require of a cloud platform | the authorisation the service needs, and how runtime SBOMs are produced | HIPAA.md §8.4 |
 | The "service" images (Ubuntu, with a shell) run only the vendor's own hosted service | whether the managed service runs the customer images instead, hardened as HARDENING.md sets out | DESIGN.md §14.1 |
 | Upgrades and fix times | the vendor applying fixes itself, within the proposed Security Rule's windows, rather than releasing them for a customer to apply | UPGRADES.md §6; D11 V2 |
+| A payer data service: in front of the plan or behind it; who runs the FHIR APIs; CMS and state flow-downs; 1-business-day service levels; MA records for 10 years; NCQA's licence and audit | V13 and the service agreements | PAYER-DATA-EXCHANGE.md §5 |
 | A pipeline per customer | each customer's pipeline isolated as HIPAA-OPERATIONS.md §2.8 sets out, with keys and readers of its own | D10 §3 |
 | Part 2 records | which way of keeping them apart the service offers (P2), and who applies Part 2's notice and limits | D10 §2 |
 
@@ -108,6 +112,9 @@ Each needs only the product's owner to schedule it.
 | A purge is asked stage by stage, and leaves the item's failures and ledger entry | a pipeline-wide purge, and what it leaves decided (HIPAA.md P4) | RETENTION.md §8 |
 | An erasure certificate names only the KEKs in use at the erasure | the retired KEKs older backups need, named too | RETENTION.md §8 |
 | The product can't tell a Part 2 record | none, unless P2 or P3 asks for one | D10 §4 |
+| No X12 transaction is mapped to FHIR (837, 835, 834, 278 to CARIN Blue Button, CARIN Digital Insurance Card, PDex), and NCPDP isn't read | mappings as WSTL sets, in the order Q5 decides, each validated against its IG | PAYER-DATA-EXCHANGE.md §4.1 |
+| A claim and its payment (837 and 835) can't be joined: one type of content per pipeline | a join keyed on the claim, revising the EOB as each part arrives, with a visible held state | PAYER-DATA-EXCHANGE.md §4.1 |
+| Part 2 programs' claims can't be told apart | labels or routing from a customer's provider list, if Q4 says so | PAYER-DATA-EXCHANGE.md §2.5 |
 | The patient lookup reads a span of at most 31 days, untimed at size, while access requests must be acted on in 15 calendar days from 2027-07-19 | time a multi-year lookup at size; a longer span or an index of patient identifiers if it doesn't fit | HIPAA.md §4.7; HIPAA-OPERATIONS.md §4.1 |
 | The product can't tell a C-CDA claims attachment from another C-CDA document, and has no intake for an X12 275 | depends on C5: an intake or a mark for attachments, if their pipeline must be kept apart | D10 §1.1, §4 |
 
@@ -115,7 +122,7 @@ Each needs only the product's owner to schedule it.
 
 | Test | Where it can run | Found in |
 |---|---|---|
-| Formats beyond C-CDA and CSV at the pipeline level: X12, EDIFACT, delimited, XML, FHIR, Parquet | locally or the sandbox | D10 §4; DEPLOYMENT.md, "Formats" |
+| Formats beyond C-CDA and CSV at the pipeline level: X12, EDIFACT, delimited, XML, FHIR, Parquet; X12 at a payer's size, with history since 2016 | locally or the sandbox; size on AWS | D10 §4; DEPLOYMENT.md, "Formats" |
 | The release before run against tables a newer release made | locally | UPGRADES.md §7 |
 | A whole-pipeline upgrade timed at size | the AWS session (HIPAA.md §11.4), with its cost approved | UPGRADES.md §7 |
 | The transform stage's control API deployed, and through an ingress | the sandbox | CONTROL-API-DEPLOYMENT.md §9 |

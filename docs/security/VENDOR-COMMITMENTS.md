@@ -147,6 +147,7 @@ SBOMs do the same (V5).
 | V8 | Before the first release: where are releases and `cosign.pub` published, and when is the build incorporated into the production pipeline, building and signing in CI with provenance (DESIGN.md §14.4)? | product owner | *open* |
 | V9 | For federal buyers: will the vendor give CISA's secure software development attestation, against NIST SP 800-218, to an agency that asks? OMB M-26-05 (2026-01-23) rescinded M-22-18 and M-23-16, so agencies may ask for it but needn't, and may require a current SBOM on request instead (HIPAA.md §8.4) | product owner, counsel | *open* |
 | V10 | Is FIPS 140 support planned, and when (HIPAA.md §11.1 P8)? | product owner | *open* |
+| V11–V13 | For payer data exchange: IG versions kept current, mapping defects fixed as High, and where a managed service sits: in [PAYER-DATA-EXCHANGE.md](PAYER-DATA-EXCHANGE.md) §8 | product owner, counsel | *open* |
 
 ## Sources
 

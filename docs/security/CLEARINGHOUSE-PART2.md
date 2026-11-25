@@ -74,7 +74,8 @@ entity". On that reading, it turns on **whose transactions the operator converts
 
 > **For review (C2): the agent's case.** Is an agent converting a covered entity's received X12 into JSON, or
 > into FHIR through a customer's mapping, a clearinghouse? Does it matter that the output is for the covered
-> entity's own use, not sent on as a transaction?
+> entity's own use, not sent on as a transaction? For a health insurer's claims, whether the agent sits in front
+> of the plan or behind it is set out in [PAYER-DATA-EXCHANGE.md](PAYER-DATA-EXCHANGE.md) §2.2 (D14, Q2).
 
 > **For review (C4): the vendor's managed service.** Where the vendor runs a pipeline for a customer that
 > converts the customer's received X12, is the vendor a clearinghouse, and what must the service's agreements
