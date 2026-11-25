@@ -82,8 +82,10 @@ asked for it; only that person's private key reads it.
 
 ### 2.4 Human identity
 
-The `--operator` name (or `$SDH_OPERATOR`) is self-asserted (HIPAA.md §8.1 item 3). Until the product authenticates
-operators itself:
+People act through the control API, which authenticates each caller with the customer's identity provider (SSO,
+with MFA required there) and grants by permission: [security/IDENTITY.md](security/IDENTITY.md) has the identities,
+the permissions, the role mapping, access reviews and leavers. The CLI is the emergency path, and its `--operator`
+name (or `$SDH_OPERATOR`) is self-asserted (HIPAA.md §8.1 item 3). For the CLI:
 
 - Grant `kubectl exec` on admin pods only through SSO-backed Kubernetes RBAC with MFA, to named people.
 - Turn on the Kubernetes API server's audit log for `pods/exec`, and send it to the SIEM. That log, not

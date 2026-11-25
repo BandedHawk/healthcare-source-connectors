@@ -93,7 +93,7 @@ What each key is and who holds it is [KEYS.md](KEYS.md) (D3). The settings:
 |---|---|---|
 | `sdh.control.mode` | `true` on the control Deployment only | serves the API; the workers don't |
 | `sdh.control.tls.enabled`, `certificate`, `key` | on, with a certificate from the operator's CA | TLS for tokens and results (§1, `control-tls`) |
-| `sdh.control.auth.jwt.issuer-uri`, `jwk-set-uri`, `audience` | the operator's identity provider, an audience of the API's own | whose tokens are trusted (D2, D13) |
+| `sdh.control.auth.jwt.issuer-uri`, `jwk-set-uri`, `audience` | the operator's identity provider, an audience of the API's own | whose tokens are trusted ([IDENTITY.md](IDENTITY.md) §3.1; D13) |
 | `sdh.control.auth.jwt.max-lifetime` | `1h` or less | the longest-lived token accepted (§1) |
 | `sdh.control.permissions` | each permission mapped to the operator's roles, least privilege; `phi.export`, `phi.break-glass`, `keys.admin`, `data.admin` and `audit.admin` to few | who may do what (CONTROL-API-DESIGN.md §3) |
 | `sdh.maintenance.retention-bounds.minimum`, `maximum` | what law and contract allow | the range an operator may set retention to through the API, so a mistake can't remove what must be kept |

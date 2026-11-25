@@ -67,8 +67,8 @@ identity may use; local keys (refused under the profile) are loaded only if list
 
 **Not covered here:** TLS keys and certificates (the brokers, Postgres, PgBouncer, the push ingress, the control
 API's server certificate and its client CA), database and broker passwords, and the identity provider's token
-signing keys. They protect connections and logins, not the stored data: the network is D1 and identity is D2
-(HIPAA.md §11.2); their settings are CONFIGURATION.md §2, §3 and §6.
+signing keys. They protect connections and logins, not the stored data: the network is D1 (HIPAA.md §11.2),
+identity is [IDENTITY.md](IDENTITY.md), and their settings are CONFIGURATION.md §2, §3 and §6.
 
 ## 3. Who holds what
 

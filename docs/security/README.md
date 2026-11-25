@@ -7,9 +7,10 @@ and settings each statement comes from, so a reviewer can check it.
 
 | # | Document | Status |
 |---|---|---|
+| D2 | [Identity and access](IDENTITY.md) | written 2026-11-25; `IdentityGuideTest` checks it names every permission and control API operation |
 | D3 | [Key management](KEYS.md) | written 2026-11-25; `KeyManagementGuideTest` checks it names every key setting |
 | D5 | [Data flows and where PHI is](DATA-FLOWS.md) | written 2026-11-24 |
 | D6 | [Security configuration guide](CONFIGURATION.md) | written 2026-11-25; `ConfigurationGuideTest` checks it names every compliance check |
 | D7 | [Audit event catalogue](AUDIT-EVENTS.md) | written 2026-11-25; `AuditEventsCatalogueTest` checks it lists every event |
 | D8 | Backup, restore and disaster recovery | in [HIPAA-OPERATIONS.md](../HIPAA-OPERATIONS.md) §7 |
-| D1, D2, D4, D9–D13 | | owed (HIPAA.md §11.2) |
+| D1, D4, D9–D13 | | owed (HIPAA.md §11.2) |
