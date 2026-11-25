@@ -15,11 +15,11 @@ sdh:
       namespace: ${ICEBERG_PREFIX}_landing
       catalog:
         type: jdbc
-        uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+        uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/${SDH_DATABASE}
         jdbc.user: splitter_${ICEBERG_PREFIX}
         jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
         jdbc.schema-version: V1
-        warehouse: s3://sdh-bronze/warehouse
+        warehouse: s3://${BRONZE_BUCKET}/warehouse
         io-impl: org.apache.iceberg.aws.s3.S3FileIO
         # The split stage's key may only read the bronze bucket.
         s3: { endpoint: "http://seaweedfs.sdh-infra.svc:8333", path-style-access: true,
@@ -51,17 +51,17 @@ sdh:
     namespace: ${ICEBERG_PREFIX}
     catalog:
       type: jdbc
-      uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+      uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/${SDH_DATABASE}
       jdbc.user: splitter_${ICEBERG_PREFIX}
       jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
       jdbc.schema-version: V1
-      warehouse: s3://sdh-silver/warehouse
+      warehouse: s3://${SILVER_BUCKET}/warehouse
       io-impl: org.apache.iceberg.aws.s3.S3FileIO
       s3: { endpoint: "http://seaweedfs.sdh-infra.svc:8333", path-style-access: true,
             access-key-id: splitter-${PIPELINE}, secret-access-key: "${S3_SECRET_ACCESS_KEY}" }
       client: { region: us-east-1 }
   lease:
-    jdbc: { url: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh", username: splitter_${ICEBERG_PREFIX} }
+    jdbc: { url: "jdbc:postgresql://postgres.sdh-infra.svc:5432/${SDH_DATABASE}", username: splitter_${ICEBERG_PREFIX} }
   crypto:
     wrap-provider: vault-transit
     sign-provider: vault-transit

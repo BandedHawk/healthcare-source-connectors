@@ -81,6 +81,39 @@ public final class PortForward implements AutoCloseable
     }
 
     /**
+     * Ends the forward's process and waits for the next to open: for when
+     * the pods behind it were replaced, so that it reaches one of the new
+     * ones and not a pod it attached to while they started.
+     *
+     * @throws IOException if the next doesn't open in time
+     */
+    public void reconnect() throws IOException
+    {
+        Process old = process;
+        old.destroy();
+        long until = System.nanoTime() + OPEN.toNanos();
+        try
+        {
+            old.waitFor();
+            while (process == old)
+            {
+                if (System.nanoTime() > until)
+                {
+                    throw new IOException("The forward to " + name
+                            + " didn't start again in " + OPEN);
+                }
+                Thread.sleep(100);
+            }
+        }
+        catch (InterruptedException interrupted)
+        {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted", interrupted);
+        }
+        await();
+    }
+
+    /**
      * Starts the forward.
      *
      * @return its process

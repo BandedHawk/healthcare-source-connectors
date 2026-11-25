@@ -171,7 +171,8 @@ deploy_harness() {
   apply_secret "$n" splitter-env --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-splitter-$P")" \
     --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas "splitter-$P")" \
     --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "inbox-passphrase-$P")" \
-    --from-literal=SDH_MAINTENANCE_INTERVAL=20s --from-literal=SDH_STORAGE_COMMIT_MAX_RECORDS=1
+    --from-literal=SDH_MAINTENANCE_INTERVAL=20s --from-literal=SDH_STORAGE_COMMIT_MAX_RECORDS=1 \
+    --from-literal=SDH_LANDING_RECONCILE_GRACE=30s --from-literal=SDH_LANDING_RECONCILE_INTERVAL=1m
   apply_config "$n" splitter-config --from-file=application.yml="$work/splitter-application.yml"
   apply_secret "$n" convert-keys --from-file=inbox.pem="$k-convert-inbox.pem" \
     --from-file=inbox-public.pem="$k-convert-inbox-public.pem" \
@@ -180,7 +181,8 @@ deploy_harness() {
   apply_secret "$n" convert-env --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-convert-$P")" \
     --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas "convert-$P")" \
     --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "convert-inbox-passphrase-$P")" \
-    --from-literal=SDH_MAINTENANCE_INTERVAL=20s
+    --from-literal=SDH_MAINTENANCE_INTERVAL=20s --from-literal=SDH_RECONCILE_GRACE=30s \
+    --from-literal=SDH_RECONCILE_INTERVAL=1m --from-literal=SDH_RECONCILE_BACKLOGQUIET=0s
   apply_config "$n" convert-config --from-file=application.yml="$work/convert-application.yml"
 
   # Each stage from the Deployment in its README, renamed as ../pipeline/apply.sh renames them, by digest.

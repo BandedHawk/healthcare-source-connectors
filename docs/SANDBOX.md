@@ -248,10 +248,14 @@ Deployment, Service and network policy in the stage's README ("Control API"), wi
 reaches the control APIs and the store through port-forwards, pushes from the producer pod, and signs its tokens
 with a key kept in `state/keys/harness-issuer.pem`, whose key set a pod (`jwks`) serves to the control APIs
 alone. Its stages have their own database roles, S3 keys, Vault tokens and KEKs (two each, for the rotation
-scenario), made by `up` with every pipeline's, and do maintenance every 20 seconds; the landing node keeps its
-tables in a schema of its own (`landing_harness`). Its scenarios erase it, so it is made afresh each time:
-`harness-down` drops its schemas and its rows in the shared lease and catalog tables, deletes its topics, groups
-and objects, and the namespace. Its Vault keys stay, as no Vault key can be deleted.
+scenario), made by `up` with every pipeline's, and do maintenance every 20 seconds; their reconcilers wait 30
+seconds and look every minute (10 and 15 minutes by default). It has a database of its own, `sdh_harness`, and
+buckets of its own, `sdh-harness-bronze` and `sdh-harness-silver`, which keep object versions (the harness turns
+versioning on), so that the restore scenario can restore its database whole without touching the demo's; the
+landing node keeps its tables in a schema of its own (`landing_harness`). Its scenarios erase it, so it is made
+afresh each time: `harness-up` makes its database and buckets, and `harness-down` drops the database, deletes the
+buckets with every version in them, its topics and groups, and the namespace. Its Vault keys stay, as no Vault
+key can be deleted.
 
 **Network policies:** each pipeline's namespace denies everything but DNS, the shared services' ports and, for the
 landing node, pushes from `sdh-producers`. The shared services accept only namespaces labelled

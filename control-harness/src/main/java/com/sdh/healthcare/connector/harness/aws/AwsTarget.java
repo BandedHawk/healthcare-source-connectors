@@ -16,6 +16,7 @@ import com.sdh.healthcare.connector.harness.Harness;
 import com.sdh.healthcare.connector.harness.Reply;
 import com.sdh.healthcare.connector.harness.Target;
 import com.sdh.healthcare.connector.harness.TestIssuer;
+import com.sdh.healthcare.connector.harness.kube.DatabaseBackups;
 import com.sdh.healthcare.connector.harness.kube.Kubectl;
 import com.sdh.healthcare.connector.harness.kube.PortForward;
 import com.sdh.healthcare.connector.harness.kube.Workers;
@@ -110,9 +111,6 @@ public final class AwsTarget implements Target
     /** The pipeline's database (deploy/reference/postgres.sql). */
     static final String DATABASE = "sdh_" + PIPELINE;
 
-    /** Where the database's backups are kept, on Postgres's volume. */
-    static final String BACKUPS = "/var/lib/postgresql/harness-backups";
-
     /** The control APIs' Deployments. */
     static final List<String> CONTROLS = List.of("sdh-control-landing",
             "sdh-control-split", "sdh-control-convert");
@@ -169,8 +167,8 @@ public final class AwsTarget implements Target
     /** Every secret the stages were given. */
     private final Set<String> secrets = new HashSet<>();
 
-    /** The backups taken, for their names. */
-    private int backups;
+    /** Backs up and restores the pipeline's database. */
+    private final DatabaseBackups backups;
 
     /**
      * Reaches the harness pipeline, which {@code poc.sh harness-up} has
@@ -191,6 +189,7 @@ public final class AwsTarget implements Target
         }
         kubectl = Kubectl.kubeconfig(state.resolve("kubeconfig"));
         workers = new Workers(kubectl, NAMESPACE, WORKERS);
+        backups = new DatabaseBackups(kubectl, NAMESPACE, DATABASE, CONTROLS);
         issuer = TestIssuer.signingWith(files.resolve("issuer.pem"),
                 files.resolve("issuer-jwks.json"));
         Path pki = files.resolve("pki");
@@ -591,12 +590,7 @@ public final class AwsTarget implements Target
     @Override
     public String backUpDatabase() throws Exception
     {
-        String backup = BACKUPS + "/" + ++backups + ".dump";
-        inPostgres("mkdir", "-p", BACKUPS);
-        inPostgres("pg_dump", "-U", "postgres", "-d", DATABASE, "-Fc", "-f",
-                backup);
-        Harness.say("Backed up the database to " + backup);
-        return backup;
+        return backups.backUp();
     }
 
     /**
@@ -607,36 +601,12 @@ public final class AwsTarget implements Target
     @Override
     public void restoreDatabase(String backup) throws Exception
     {
-        for (String control : CONTROLS)
+        backups.restore(backup);
+        // Their forwards ended with their pods, and may have attached to
+        // the new ones before they served: started again on them.
+        for (PortForward forward : controls.values())
         {
-            kubectl.kubectl("-n", NAMESPACE, "scale", "deploy/" + control,
-                    "--replicas=0");
-        }
-        kubectl.kubectl("-n", NAMESPACE, "wait", "--for=delete", "pod", "-l",
-                "app in (" + String.join(",", CONTROLS) + ")",
-                "--timeout=110s");
-        inPostgres("psql", "-U", "postgres", "-d", "postgres", "-v",
-                "ON_ERROR_STOP=1", "-c", "DROP DATABASE " + DATABASE
-                        + " WITH (FORCE)");
-        inPostgres("pg_restore", "-U", "postgres", "-d", "postgres",
-                "--create", "--exit-on-error", backup);
-        Harness.say("Restored the database from " + backup);
-        for (String control : CONTROLS)
-        {
-            kubectl.kubectl("-n", NAMESPACE, "scale", "deploy/" + control,
-                    "--replicas=1");
-        }
-        for (String control : CONTROLS)
-        {
-            Kubectl.Result result = Kubectl.run(kubectl.command("-n",
-                    NAMESPACE, "rollout", "status", "deploy/" + control,
-                    "--timeout=" + Workers.READY.toSeconds() + "s"), null,
-                    Workers.READY.plusMinutes(1));
-            if (!result.ok())
-            {
-                throw new IOException(control + " wasn't back in "
-                        + Workers.READY + ": " + result.errors().strip());
-            }
+            forward.reconnect();
         }
     }
 
@@ -644,20 +614,6 @@ public final class AwsTarget implements Target
     public void stopWorkers(String stage) throws Exception
     {
         workers.stop(stage);
-    }
-
-    /**
-     * Runs a command in the Postgres pod's database container.
-     *
-     * @param command the command and its arguments
-     * @throws IOException if it fails
-     */
-    private void inPostgres(String... command) throws IOException
-    {
-        List<String> args = new ArrayList<>(List.of("-n", INFRA, "exec",
-                "postgres-0", "-c", "postgres", "--"));
-        args.addAll(List.of(command));
-        kubectl.kubectl(args.toArray(String[]::new));
     }
 
     @Override

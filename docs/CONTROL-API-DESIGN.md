@@ -1042,7 +1042,10 @@ depends on neither of the others.
   their node (`docker pause` through `minikube ssh`; Postgres, the three Kafka brokers, SeaweedFS, Vault);
   restarts a stage by deleting its pods and kills it by force-deleting them, then waits for a new pod to be ready
   or to exit; lists the store with the stage's own S3 key. `TestIssuer.signingWith` signs with the key
-  `harness-up` keeps in `state/keys/harness-issuer.pem`, under the kid of the JWKS it serves.
+  `harness-up` keeps in `state/keys/harness-issuer.pem`, under the kid of the JWKS it serves. Since 2026-11-24
+  (DESIGN.md revision (fl)) it also restores: it turns versioning on in the pipeline's own buckets with the
+  sandbox's admin key, and backs up and restores the pipeline's own database with `kube.DatabaseBackups`, as
+  `AwsTarget` does, starting each control API's forward again after (`PortForward.reconnect`).
 - **Added to both levels:** `Target.kill` and the `failover` scenario (each stage's workers killed with items on
   their way: three items before split's, three before convert's, one pushed while the landing node's
   replacement takes over its lease; every item then converted and split exactly as many times as it has

@@ -14,6 +14,7 @@ import com.sdh.healthcare.connector.harness.Harness;
 import com.sdh.healthcare.connector.harness.Reply;
 import com.sdh.healthcare.connector.harness.Target;
 import com.sdh.healthcare.connector.harness.TestIssuer;
+import com.sdh.healthcare.connector.harness.kube.DatabaseBackups;
 import com.sdh.healthcare.connector.harness.kube.Kubectl;
 import com.sdh.healthcare.connector.harness.kube.PortForward;
 import com.sdh.healthcare.connector.harness.kube.Workers;
@@ -38,6 +39,8 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.BucketVersioningStatus;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
@@ -55,6 +58,12 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * tokens are signed with the harness issuer's key, kept in the sandbox's
  * state directory, whose key set a pod in the namespace serves.
  *
+ * <p>The pipeline has a database and buckets of its own, apart from the
+ * demo pipelines' (HIPAA.md §11.4, L3), so the restore scenario runs here:
+ * the buckets' versioning is turned on at the start, with the sandbox's
+ * admin key, and the database is backed up and restored whole in the
+ * Postgres pod, as on the AWS PoC.
+ *
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -69,6 +78,22 @@ public final class SandboxTarget implements Target
 
     /** The shared services' namespace. */
     static final String INFRA = "sdh-infra";
+
+    /** The pipeline's database ({@code sandbox.sh pipeline_database}). */
+    static final String DATABASE = "sdh_" + PIPELINE;
+
+    /** Its bucket for landed items ({@code sandbox.sh pipeline_bucket}). */
+    static final String BRONZE = "sdh-" + PIPELINE + "-bronze";
+
+    /** Its bucket for records. */
+    static final String SILVER = "sdh-" + PIPELINE + "-silver";
+
+    /** The store's key that may turn versioning on. */
+    static final String ADMIN = "sandbox-admin";
+
+    /** The control APIs' Deployments. */
+    static final List<String> CONTROLS = List.of("sdh-control-landing",
+            "sdh-control-split", "sdh-control-convert");
 
     /** Each stage's workers' {@code app} label, and its role in state. */
     static final Map<String, String> WORKERS = Map.of(LANDING, "landing",
@@ -112,6 +137,12 @@ public final class SandboxTarget implements Target
     /** Every secret the stages were given. */
     private final Set<String> secrets = new HashSet<>();
 
+    /** Backs up and restores the pipeline's database. */
+    private final DatabaseBackups backups;
+
+    /** Whether the buckets keep object versions. */
+    private final boolean versioned;
+
     /**
      * Reaches the harness pipeline, which {@code sandbox.sh harness-up}
      * has deployed.
@@ -125,6 +156,7 @@ public final class SandboxTarget implements Target
         this.state = state;
         kubectl = Kubectl.minikube(profile);
         workers = new Workers(kubectl, NAMESPACE, WORKERS);
+        backups = new DatabaseBackups(kubectl, NAMESPACE, DATABASE, CONTROLS);
         Path keys = state.resolve("keys");
         issuer = TestIssuer.signingWith(keys.resolve(PIPELINE
                 + "-issuer.pem"), keys.resolve(PIPELINE + "-issuer-jwks.json"));
@@ -138,6 +170,7 @@ public final class SandboxTarget implements Target
         }
         secrets.add(secret("inbox-passphrase-" + PIPELINE));
         secrets.add(secret("convert-inbox-passphrase-" + PIPELINE));
+        secrets.add(secret("s3-" + ADMIN));
         Harness.say("Forwarding to the harness pipeline's control APIs and"
                 + " the store");
         for (String stage : stages())
@@ -146,6 +179,58 @@ public final class SandboxTarget implements Target
                     "svc/sdh-control-" + stage, 8443));
         }
         store = new PortForward(kubectl, INFRA, "svc/seaweedfs", 8333);
+        try (S3Client s3 = s3(ADMIN))
+        {
+            versioned = versioning(s3);
+        }
+    }
+
+    /**
+     * Turns on versioning in the pipeline's buckets, as a deployment must
+     * for a restore (DEPLOYMENT.md), if the store can.
+     *
+     * @param s3 the store, as its admin
+     * @return whether it could
+     */
+    private static boolean versioning(S3Client s3)
+    {
+        try
+        {
+            for (String bucket : List.of(BRONZE, SILVER))
+            {
+                s3.putBucketVersioning(request -> request.bucket(bucket)
+                        .versioningConfiguration(configuration ->
+                                configuration.status(
+                                        BucketVersioningStatus.ENABLED)));
+            }
+            return true;
+        }
+        catch (S3Exception unsupported)
+        {
+            Harness.say("The store doesn't keep object versions ("
+                    + unsupported.statusCode() + "): no restore scenario");
+            return false;
+        }
+    }
+
+    /**
+     * A client of the store, through its forward, with a key of the
+     * sandbox's.
+     *
+     * @param key the key's name, whose secret is in the state directory
+     * @return the client
+     * @throws IOException if the secret can't be read or the forward
+     *                     isn't up
+     */
+    private S3Client s3(String key) throws IOException
+    {
+        return S3Client.builder()
+                .endpointOverride(URI.create("http://127.0.0.1:"
+                        + store.port()))
+                .forcePathStyle(true).region(Region.US_EAST_1)
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create(key, secret("s3-" + key))))
+                .build();
     }
 
     /**
@@ -367,6 +452,36 @@ public final class SandboxTarget implements Target
     }
 
     @Override
+    public boolean restores()
+    {
+        return versioned;
+    }
+
+    @Override
+    public String backUpDatabase() throws Exception
+    {
+        return backups.backUp();
+    }
+
+    @Override
+    public void restoreDatabase(String backup) throws Exception
+    {
+        backups.restore(backup);
+        // Their forwards ended with their pods, and may have attached to
+        // the new ones before they served: started again on them.
+        for (PortForward forward : controls.values())
+        {
+            forward.reconnect();
+        }
+    }
+
+    @Override
+    public void stopWorkers(String stage) throws Exception
+    {
+        workers.stop(stage);
+    }
+
+    @Override
     public String kek(String stage)
     {
         return PIPELINE + (stage.equals(LANDING) ? "-landed-items"
@@ -389,22 +504,15 @@ public final class SandboxTarget implements Target
     @Override
     public List<String> stored(String stage) throws Exception
     {
-        String bucket = stage.equals(LANDING) ? "sdh-bronze" : "sdh-silver";
+        String bucket = stage.equals(LANDING) ? BRONZE : SILVER;
         String prefix = switch (stage)
         {
             case LANDING -> "warehouse/" + PIPELINE + "_landing/";
             case SPLIT -> "warehouse/" + PIPELINE + "/split_records";
             default -> "warehouse/" + PIPELINE + "/records";
         };
-        String key = WORKERS.get(stage) + "-" + PIPELINE;
         List<String> keys = new ArrayList<>();
-        try (S3Client s3 = S3Client.builder()
-                .endpointOverride(URI.create("http://127.0.0.1:"
-                        + store.port()))
-                .forcePathStyle(true).region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(
-                        AwsBasicCredentials.create(key, secret("s3-" + key))))
-                .build())
+        try (S3Client s3 = s3(WORKERS.get(stage) + "-" + PIPELINE))
         {
             s3.listObjectsV2Paginator(request -> request.bucket(bucket)
                     .prefix(prefix)).contents().stream().map(S3Object::key)

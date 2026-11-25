@@ -91,6 +91,13 @@ ns() { echo "sdh-$1"; }
 prefix() { echo "${1//-/_}"; }
 # all_pipelines: the demo pipelines and the harness's, once each.
 all_pipelines() { printf '%s\n' $PIPELINES "$HARNESS" | awk '!seen[$0]++'; }
+# pipeline_database <pipeline>: its database. The harness pipeline has one of its own, which its restore scenario
+# backs up and restores whole (HIPAA.md §11.4, L3); the demo pipelines share sdh.
+pipeline_database() { if [[ "$1" == "$HARNESS" ]]; then echo "sdh_$(prefix "$1")"; else echo sdh; fi; }
+# pipeline_bucket <pipeline> <layer>: its bucket for a medallion layer. The harness pipeline has its own, which
+# keep object versions, as a restore needs (the harness turns versioning on); the demo pipelines share theirs,
+# without versions, so that what their maintenance deletes is gone.
+pipeline_bucket() { if [[ "$1" == "$HARNESS" ]]; then echo "sdh-$1-$2"; else echo "sdh-$2"; fi; }
 
 # --- Cluster ---------------------------------------------------------------------------------------------------
 
@@ -279,14 +286,16 @@ s3_config() {
   local identities=() p
   identities+=("$(s3_identity sandbox-admin "$(secret s3-sandbox-admin)" Admin Read Write List Tagging)")
   # The harness pipeline's too, always, so that starting and ending it doesn't restart SeaweedFS.
+  local b s
   for p in $(all_pipelines); do
+    b="$(pipeline_bucket "$p" bronze)"; s="$(pipeline_bucket "$p" silver)"
     identities+=("$(s3_identity "landing-$p" "$(secret "s3-landing-$p")" \
-      Read:sdh-bronze Write:sdh-bronze List:sdh-bronze Tagging:sdh-bronze)")
-    identities+=("$(s3_identity "splitter-$p" "$(secret "s3-splitter-$p")" Read:sdh-bronze List:sdh-bronze \
-      Read:sdh-silver Write:sdh-silver List:sdh-silver Tagging:sdh-silver)")
+      "Read:$b" "Write:$b" "List:$b" "Tagging:$b")")
+    identities+=("$(s3_identity "splitter-$p" "$(secret "s3-splitter-$p")" "Read:$b" "List:$b" \
+      "Read:$s" "Write:$s" "List:$s" "Tagging:$s")")
     identities+=("$(s3_identity "convert-$p" "$(secret "s3-convert-$p")" \
-      Read:sdh-silver Write:sdh-silver List:sdh-silver Tagging:sdh-silver)")
-    identities+=("$(s3_identity "fhir-$p" "$(secret "s3-fhir-$p")" Read:sdh-silver List:sdh-silver \
+      "Read:$s" "Write:$s" "List:$s" "Tagging:$s")")
+    identities+=("$(s3_identity "fhir-$p" "$(secret "s3-fhir-$p")" "Read:$s" "List:$s" \
       Read:sdh-gold Write:sdh-gold List:sdh-gold Tagging:sdh-gold)")
   done
   local IFS=,
@@ -504,16 +513,22 @@ print(data["keys"][str(data["latest_version"])]["public_key"].strip())'
 }
 
 setup_buckets() {
-  local bucket out
-  for bucket in sdh-bronze sdh-silver sdh-gold; do
-    # Until it is made, or is there already: the S3 gateway takes a while to find its master after a restart.
-    local deadline=$((SECONDS + 300))
-    until out="$(infra exec statefulset/seaweedfs -- sh -c \
-        "echo 's3.bucket.create -name $bucket' | weed shell -master=localhost:9333" 2>&1)" \
-        && ! grep -q error <<<"$out" || grep -q "already exists" <<<"$out"; do
-      ((SECONDS < deadline)) || { echo "Could not create bucket $bucket: $out" >&2; exit 1; }
-      sleep 5
-    done
+  local bucket
+  for bucket in sdh-bronze sdh-silver sdh-gold "$(pipeline_bucket "$HARNESS" bronze)" \
+      "$(pipeline_bucket "$HARNESS" silver)"; do
+    make_bucket "$bucket"
+  done
+}
+
+# make_bucket <bucket>: made, or there already.
+make_bucket() {
+  local out deadline=$((SECONDS + 300))
+  # Until it is made, or is there already: the S3 gateway takes a while to find its master after a restart.
+  until out="$(infra exec statefulset/seaweedfs -- sh -c \
+      "echo 's3.bucket.create -name $1' | weed shell -master=localhost:9333" 2>&1)" \
+      && ! grep -q error <<<"$out" || grep -q "already exists" <<<"$out"; do
+    ((SECONDS < deadline)) || { echo "Could not create bucket $1: $out" >&2; exit 1; }
+    sleep 5
   done
 }
 
@@ -721,7 +736,9 @@ deploy_pipeline() {
   trap "rm -rf '$work'" RETURN
   say "Pipeline $p (namespace $n)"
   export PIPELINE="$p" K8S_NS="$n" ICEBERG_PREFIX="$(prefix "$p")" PRODUCER_SUBJECT KAFKA_BROKERS \
-    SPLIT_FORMAT="ccda"
+    SPLIT_FORMAT="ccda" SDH_DATABASE BRONZE_BUCKET SILVER_BUCKET
+  SDH_DATABASE="$(pipeline_database "$p")"
+  BRONZE_BUCKET="$(pipeline_bucket "$p" bronze)"; SILVER_BUCKET="$(pipeline_bucket "$p" silver)"
   envsubst '$PIPELINE $K8S_NS' < "$DEPLOY/pipeline/namespace.yaml" | kc apply -f - >/dev/null
 
   # Each stage's inbox key pair, which the stage before it seals its messages to, and the FHIR stage's, which the
@@ -738,7 +755,7 @@ deploy_pipeline() {
   RECIPIENT_SHA256="$(fingerprint "$STATE/keys/$p-fhir-recipient-public.pem")"
   CONSUMER_SHA256="$(fingerprint "$STATE/keys/$p-consumer-public.pem")"
   local vars='$PIPELINE $ICEBERG_PREFIX $PRODUCER_SUBJECT $INBOX_SHA256 $CONVERT_INBOX_SHA256 $RECIPIENT_SHA256'
-  vars+=' $CONSUMER_SHA256 $KAFKA_BROKERS $SPLIT_FORMAT'
+  vars+=' $CONSUMER_SHA256 $KAFKA_BROKERS $SPLIT_FORMAT $SDH_DATABASE $BRONZE_BUCKET $SILVER_BUCKET'
   local stage
   for stage in landing splitter convert; do
     envsubst "$vars" < "$DEPLOY/pipeline/$stage-application.yml" > "$work/$stage-application.yml"
@@ -747,14 +764,18 @@ deploy_pipeline() {
   # The harness pipeline (harness-up) has no transform stage, so no registry for the convert stage to mark items
   # in; and each stage carries out maintenance (re-keys, purges, retention) every 20 seconds, as the harness's
   # first level does, its landing node with its tables in a schema of its own, which harness-down drops; and
-  # the split stage stores each record as it is split.
+  # the split stage stores each record as it is split; and the split and convert stages' reconcilers send again,
+  # within minutes, what a restored registry lacks (the defaults wait 10 minutes and look every 15), as the
+  # harness's first level has them.
   local landing_extra=() splitter_extra=() convert_extra=()
   if [[ "$p" == "$HARNESS" ]]; then
     sed -i '/next-registry-schema:/d' "$work/convert-application.yml"
     landing_extra=(--from-literal=SDH_MAINTENANCE_INTERVAL=20s
       --from-literal=SDH_LEASE_JDBC_TABLE="landing_$(prefix "$p").sdh_lease")
-    splitter_extra=(--from-literal=SDH_MAINTENANCE_INTERVAL=20s --from-literal=SDH_STORAGE_COMMIT_MAX_RECORDS=1)
-    convert_extra=(--from-literal=SDH_MAINTENANCE_INTERVAL=20s)
+    splitter_extra=(--from-literal=SDH_MAINTENANCE_INTERVAL=20s --from-literal=SDH_STORAGE_COMMIT_MAX_RECORDS=1
+      --from-literal=SDH_LANDING_RECONCILE_GRACE=30s --from-literal=SDH_LANDING_RECONCILE_INTERVAL=1m)
+    convert_extra=(--from-literal=SDH_MAINTENANCE_INTERVAL=20s --from-literal=SDH_RECONCILE_GRACE=30s
+      --from-literal=SDH_RECONCILE_INTERVAL=1m --from-literal=SDH_RECONCILE_BACKLOGQUIET=0s)
   fi
 
   apply_secret "$n" landing-keys --from-file=tls.crt="$STATE/pki/landing-$p.crt" \
@@ -1065,9 +1086,22 @@ release_demo() {
   done
 }
 
-# harness_sql <sql>: runs it in the sdh database as postgres.
+# harness_sql <database> <sql>: runs it in the database as postgres.
 harness_sql() {
-  printf '%s\n' "$1" | infra exec -i postgres-0 -- env PGPASSWORD="" psql -q -v ON_ERROR_STOP=1 -U postgres -d sdh
+  printf '%s\n' "$2" | infra exec -i postgres-0 -- env PGPASSWORD="" psql -q -v ON_ERROR_STOP=1 -U postgres -d "$1"
+}
+
+# harness_store: the harness pipeline's database and buckets, made anew (harness_clean removes them): the
+# database for its stages' roles, as sdh is for the demo's (setup_database), the buckets empty.
+harness_store() {
+  local db
+  db="$(pipeline_database "$HARNESS")"
+  harness_sql postgres "SELECT 'CREATE DATABASE $db' WHERE NOT EXISTS
+      (SELECT FROM pg_database WHERE datname = '$db')\\gexec
+    GRANT CREATE ON DATABASE $db TO sdh_catalog;" >/dev/null
+  harness_sql "$db" "GRANT ALL ON SCHEMA public TO sdh_catalog;" >/dev/null
+  make_bucket "$(pipeline_bucket "$HARNESS" bronze)"
+  make_bucket "$(pipeline_bucket "$HARNESS" silver)"
 }
 
 harness_up() {
@@ -1081,23 +1115,27 @@ harness_up() {
   hold_demo
   say "Harness pipeline $HARNESS"
   PIPELINES="$HARNESS" setup_topics
+  harness_store
   # The landing node's lease, control and audit tables, in a schema of its own (the others are in the stages'
-  # registries), so that harness-down can drop them.
-  harness_sql "CREATE SCHEMA IF NOT EXISTS landing_$(prefix "$HARNESS") AUTHORIZATION sdh_catalog;" >/dev/null
+  # registries).
+  harness_sql "$(pipeline_database "$HARNESS")" \
+    "CREATE SCHEMA IF NOT EXISTS landing_$(prefix "$HARNESS") AUTHORIZATION sdh_catalog;" >/dev/null
   harness_issuer
   deploy_producer
   deploy_pipeline "$HARNESS"
   kc -n sdh-producers rollout status deploy/producer --timeout=300s >/dev/null
 }
 
-# harness_clean: deletes the harness pipeline and everything it stored: its namespace, its tables and registry
-# schemas, its rows in the shared lease and catalog tables, its topics and groups, and its objects. Its Vault
-# keys are kept (they can't be deleted; harness-up uses them again). Synthetic data only.
+# harness_clean: deletes the harness pipeline and everything it stored: its namespace, its database, its topics
+# and groups, and its buckets, every object version in them. Its Vault keys are kept (they can't be deleted;
+# harness-up uses them again). Synthetic data only. What it stored in sdh and the shared buckets before it had a
+# database and buckets of its own (2026-11-24) is removed too.
 harness_clean() {
   local n x
   n="$(ns "$HARNESS")"; x="$(prefix "$HARNESS")"
   kc delete ns "$n" --ignore-not-found --wait=true --timeout=300s >/dev/null
-  harness_sql "SET client_min_messages TO warning;
+  harness_sql postgres "DROP DATABASE IF EXISTS $(pipeline_database "$HARNESS") WITH (FORCE);" >/dev/null
+  harness_sql sdh "SET client_min_messages TO warning;
     DROP SCHEMA IF EXISTS landing_$x, split_$x, convert_$x CASCADE;
     DO \$\$ BEGIN
       IF to_regclass('public.sdh_lease') IS NOT NULL THEN
@@ -1118,7 +1156,10 @@ harness_clean() {
       --group "$group" >/dev/null 2>&1 || true
   done
   infra exec statefulset/seaweedfs -- sh -c "printf '%s\n' 'fs.rm -r /buckets/sdh-bronze/warehouse/${x}_landing' \
-    'fs.rm -r /buckets/sdh-silver/warehouse/$x' | weed shell -master=localhost:9333" >/dev/null 2>&1 || true
+    'fs.rm -r /buckets/sdh-silver/warehouse/$x' \
+    's3.bucket.delete -name $(pipeline_bucket "$HARNESS" bronze)' \
+    's3.bucket.delete -name $(pipeline_bucket "$HARNESS" silver)' | weed shell -master=localhost:9333" \
+    >/dev/null 2>&1 || true
 }
 
 harness_down() {
