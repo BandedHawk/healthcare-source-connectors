@@ -129,8 +129,8 @@ SeaweedFS, Vault and the collector were open, and the broker's other listener (9
 (1.1.1.1:443) and the namespace's own landing and control ports closed; from `sdh-producers` the landing node's 8443
 was open and the control API's closed; from another pipeline's namespace both were closed. Under them, ten of the
 control harness's eleven scenarios (`scripts/harness.sh sandbox`) passed, the kubelet's probes and the kits' control
-policies included; `erasure` failed once on a race in `audit-verify`, not the network (DESIGN.md revision (fm)),
-and passed when rerun.
+policies included; `erasure` failed once on a race in `audit-verify`, not the network. With that fixed (DESIGN.md
+revision (fm)), all eleven passed.
 
 - **With an S3 gateway endpoint** instead of an interface one, S3's addresses are public ones, which a
   NetworkPolicy can't name by prefix list. The PoC allows 443 to every address outside the private ranges
