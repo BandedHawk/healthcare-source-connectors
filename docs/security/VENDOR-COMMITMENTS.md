@@ -13,6 +13,16 @@ fixes are released and how quickly, how to report a vulnerability, and what the 
 customer's data. It is HIPAA.md §11.2's document D11 (§8.2 item 8 there). How a customer takes a release is
 [UPGRADES.md](UPGRADES.md) (D12).
 
+**It is written for a customer that operates the product.** The vendor will also offer managed services using
+this pipeline, under separate agreements: there the vendor operates the pipeline and holds the customer's PHI, and
+the vendor's and the customer's obligations are reshaped around that relationship (§1.3, V1). This document is
+meant to shape that offering's commitments too. The gaps it leaves are kept in [KNOWN-GAPS.md](KNOWN-GAPS.md).
+
+**The project is a proof of concept.** Its builds are outside the company's standard development process and CI
+pipeline, and so outside the static and dynamic security scans that process includes. §1 describes the PoC's own
+build tooling; once the build is incorporated into the production pipeline, §1 is to be revised to describe what
+that pipeline does (§1.4).
+
 ## 1. What every release has today
 
 ### 1.1 Known vulnerabilities kept out
@@ -40,7 +50,7 @@ customer's data. It is HIPAA.md §11.2's document D11 (§8.2 item 8 there). How 
 (§1.4), then verifies the result as a customer would: with the public key only, a tampered tarball refused, and
 another key refused.
 
-### 1.3 What the vendor never has
+### 1.3 What the vendor never has, when the customer operates the product
 
 - **No access to the customer's data.** The product sends nothing to the vendor: telemetry and audit events go to
   the customer's own collector and store, and there is no licence check, update check or phone-home.
@@ -49,21 +59,31 @@ another key refused.
   So the vendor is not the customer's business associate by supporting the product (HIPAA.md §1).
 - **No access to the customer's keys.** Every key is the customer's, in their KMS ([KEYS.md](KEYS.md)).
 
-> **For review (V1): the vendor's role.** The product's owner and counsel to confirm that the vendor offers no
-> hosted service, and no support that needs access to a customer's environment, under this document. Where it
-> does (the "service" images, DESIGN.md §14.1), the vendor would be a business associate, and that offer needs a
-> document of its own.
+**Under a managed service none of this holds:** the vendor operates the pipeline, so it creates, receives,
+maintains and transmits the customer's PHI, and is the customer's business associate (or subcontractor). That
+service's agreements say who holds the keys, which of the vendor's staff may reach PHI, and which of the operator's
+duties are the vendor's ([KNOWN-GAPS.md](KNOWN-GAPS.md) §4).
+
+> **For review (V1): the vendor's role.** The product's owner and counsel to confirm that, under this document,
+> the vendor offers no support that needs access to a customer's environment; and that managed services are
+> offered only under agreements of their own (a BAA among them), which say how the commitments of §2 and §3 apply
+> when the vendor operates the pipeline and applies fixes itself.
 
 ### 1.4 What it doesn't have yet
+
+**The PoC is outside the standard process.** The items below are expected to be closed by incorporating the build
+into the company's production pipeline, which includes static and dynamic security scans and the standard CI
+pipeline; they are tracked in [KNOWN-GAPS.md](KNOWN-GAPS.md) §3 until then.
 
 - **No release has been published.** The release registry, and where tarballs, signatures and `cosign.pub` are
   published, are not set up (DESIGN.md §14.4).
 - **The transform stage isn't in the release script.** `sign-release.sh` builds, scans, signs and verifies the
   landing, split and convert stages; the transform stage, from its own repository, has a "Verify what you
   received" section in its README but no release run behind it yet.
-- **Releases are built and signed on a workstation,** not in CI, so there is no build provenance attestation
-  (SLSA) yet.
-- **No static analysis or secrets scanning** of the code runs at build time.
+- **Releases are built and signed on a workstation,** not in the standard CI pipeline, so there is no build
+  provenance attestation (SLSA) yet.
+- **No static or dynamic security scans, and no secrets scanning,** run on the PoC's builds: they are part of the
+  standard process, not of the PoC's tooling.
 - **FIPS 140 is not supported** ([HARDENING.md](HARDENING.md); each kit's README): no FIPS 140-validated module is
   used or tested.
 - **No penetration test of the product by the vendor.** Customers test their own deployments (HIPAA.md §11.1 P13);
@@ -116,14 +136,14 @@ SBOMs do the same (V5).
 
 | ID | Question | For | Answer |
 |---|---|---|---|
-| V1 | Does the vendor offer no hosted service and no support needing access to a customer's environment, under this document? | product owner, counsel | *open* |
+| V1 | Under this document, does the vendor offer no support needing access to a customer's environment? Are managed services offered only under agreements of their own, saying how §2 and §3 apply to them? | product owner, counsel | *open* |
 | V2 | How quickly are fixes released, by severity? | product owner | *open* |
 | V3 | Which releases get fixes, and for how long? | product owner | *open* |
 | V4 | How are customers told: advisories, contacts, VEX? | product owner | *open* |
 | V5 | How often does the vendor rescan supported releases? | product owner | *open* |
 | V6 | How is a vulnerability reported, and how quickly acknowledged and assessed? | product owner | *open* |
 | V7 | Is there a published disclosure policy, with safe harbour and a disclosure timeline? | product owner, counsel | *open* |
-| V8 | Before the first release: where are releases and `cosign.pub` published, and are they built and signed in CI with provenance (DESIGN.md §14.4)? | product owner | *open* |
+| V8 | Before the first release: where are releases and `cosign.pub` published, and when is the build incorporated into the production pipeline, building and signing in CI with provenance (DESIGN.md §14.4)? | product owner | *open* |
 | V9 | For federal buyers: will the vendor give the secure software development attestation (CISA's form, under OMB M-22-18 and M-23-16), and against which practices (NIST SP 800-218)? Its status changed in 2025 and hasn't been checked (HIPAA.md §8.4) | product owner, counsel | *open* |
 | V10 | Is FIPS 140 support planned, and when (HIPAA.md §11.1 P8)? | product owner | *open* |
 
@@ -133,4 +153,4 @@ SBOMs do the same (V5).
   `scripts/base-images.sh`; `docker/base-images.env`, `docker/vuln-accepted.yaml`, `renovate.json`; the parent
   POM's security overrides and `cyclonedx-maven-plugin`.
 - **Documents:** HIPAA.md §1, §8.2 item 8, §8.4, §11.1 (P8, P13); HIPAA-OPERATIONS.md §9; each kit's README,
-  "Verify what you received"; HARDENING.md; KEYS.md; UPGRADES.md.
+  "Verify what you received"; HARDENING.md; KEYS.md; UPGRADES.md; KNOWN-GAPS.md.

@@ -17,6 +17,11 @@ whether a record came from a Part 2 program. What it gives is a way to keep data
 with its own database, buckets, keys, topics and readers) and the source's own confidentiality labels, carried
 through as sent.
 
+**It is written for a customer that operates the product.** The vendor will also offer managed services using this
+pipeline, under separate agreements; there the vendor runs the pipeline for the customer, and may itself be in the
+agent's position of §1.2 (C4). This document is meant to shape that offering too. The gaps it leaves are kept in
+[KNOWN-GAPS.md](KNOWN-GAPS.md).
+
 ## 1. The clearinghouse question
 
 ### 1.1 What the product does to X12
@@ -47,11 +52,16 @@ transactions the operator converts, and for whom:**
 | An agent (a TPA, a PBM, a fiscal agent) | a pipeline converting a covered entity's received transactions, for that entity | may be a clearinghouse, acting as that entity's business associate |
 | An agent serving several covered entities | a pipeline per entity | as above, for each |
 | A government agency (a hybrid entity) | a pipeline for a health care component | depends on the component; the component's PHI is kept from the others in any case (§ 164.105) |
+| The vendor, under a managed service | a pipeline per customer, converting that customer's received transactions | as an agent: the customer's business associate, and may be a clearinghouse (C4) |
 | Any operator | only C-CDA, FHIR, CSV or other non-X12 intakes | Part 162 transactions aren't involved |
 
 > **For review (C2): the agent's case.** Is an agent converting a covered entity's received X12 into JSON, or
 > into FHIR through a customer's mapping, a clearinghouse? Does it matter that the output is for the covered
 > entity's own use, not sent on as a transaction?
+
+> **For review (C4): the vendor's managed service.** Where the vendor runs a pipeline for a customer that
+> converts the customer's received X12, is the vendor a clearinghouse, and what must the service's agreements
+> and isolation provide for it (§1.3)?
 
 ### 1.3 What follows if it is
 
@@ -73,8 +83,9 @@ transactions the operator converts, and for whom:**
   stages are refused another's database, buckets and keys.
 - **X12 kept as received.** Each element is kept; nothing is reworded, dropped or coded anew, so the converted
   record can be traced to the transaction it came from (positions in each record's origin).
-- **The vendor is not the clearinghouse.** The vendor doesn't operate the pipeline or see its data: support never
-  needs PHI (HIPAA.md §1).
+- **The vendor is not the clearinghouse when the customer operates the product.** The vendor doesn't operate the
+  pipeline or see its data: support never needs PHI (HIPAA.md §1). Under a managed service it does operate it
+  (C4).
 
 ## 2. Part 2 records
 
@@ -167,6 +178,7 @@ Then record, in the operator's documentation, which pipeline holds what, for who
 | C1 | Is §1.2's reading of the clearinghouse definition (§ 160.103, (1) and (2)) right? | counsel | *open* |
 | C2 | Is an agent converting a covered entity's received X12 into JSON or FHIR, for that entity's own use, a clearinghouse? | counsel | *open* |
 | C3 | Are §1.3's consequences right, and complete (Part 162, § 164.500(b), isolation, the BAA)? | counsel | *open* |
+| C4 | Under a managed service converting a customer's received X12, is the vendor a clearinghouse, and what must the agreements and isolation provide? | counsel, product owner | *open* |
 | P1 | Is §2.1's summary of the 2024 Part 2 rule right, and is its compliance date 2026-02-16? | counsel | *open* |
 | P2 | Way A (an intake of its own) as the recommendation, with way B allowed where sources label every record? | counsel, product owner | *open* |
 | P3 | Should the product add anything to help readers with Part 2's redisclosure notice, or leave it to them? | product owner | *open* |
@@ -177,6 +189,6 @@ Then record, in the operator's documentation, which pipeline holds what, for who
   (ff); `secondary/security.wstl` in the mapping repository); the gold row's `confidentiality` column;
   `PipelineIsolationIT`.
 - **Documents:** HIPAA.md §1 (the clearinghouse question), §4.5 (Part 2), §9 (what wasn't checked), §11.1 P9;
-  HIPAA-OPERATIONS.md §2.8; DATA-FLOWS.md; RETENTION.md.
+  HIPAA-OPERATIONS.md §2.8; DATA-FLOWS.md; RETENTION.md; KNOWN-GAPS.md.
 - **Rules, not checked for this draft:** 45 CFR § 160.103 ("health care clearinghouse"), § 162.923, § 162.930,
   § 164.105, § 164.308(a)(4)(ii)(A), § 164.500(b); 42 CFR Part 2 as revised by 89 FR 12472 (2024).

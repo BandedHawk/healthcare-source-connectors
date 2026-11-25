@@ -1,0 +1,134 @@
+# Known gaps, and what each waits on
+
+> **Internal.** This is the vendor's register, not a customer document. It gathers in one place every gap the
+> security documents (D1 to D13) and HIPAA.md found, and says what each waits on. Many can't be closed until a
+> review, a production build pipeline or a service agreement exists, so they are kept here until then rather than
+> lost in the documents that found them. Gaps already corrected in a document are not listed.
+
+The product's outstanding work is HIPAA.md §11; this register adds what the security documents found since, sorted
+by what has to happen first. Each row names where the gap was found, so the finding there stays the full account.
+
+## 1. Two ways the product is offered
+
+- **The customer operates it.** The customer deploys a release in its own environment and is the covered entity
+  or business associate; the vendor never has its data (HIPAA.md §1). The security documents are written for
+  this case.
+- **The vendor operates it, as a managed service.** The vendor will also offer managed services using this
+  pipeline, under separate agreements. There the vendor creates, receives, maintains and transmits the customer's
+  PHI, so it is the customer's business associate (or subcontractor), and the vendor's and the customer's
+  obligations are reshaped around that relationship.
+
+The documents in this project shape both: the managed service's own runbooks, controls and commitments are to be
+drawn from them, and the customer documentation for a managed service from what they say the operator does. Where a
+gap below is different under a managed service, its row says so.
+
+## 2. Waiting on review: legal standing and the vendor's commitments
+
+These need counsel or the product's owner before the documents that raise them are published, or the product
+changed. The questions are in [CLEARINGHOUSE-PART2.md](CLEARINGHOUSE-PART2.md) §5 (D10) and
+[VENDOR-COMMITMENTS.md](VENDOR-COMMITMENTS.md) §4 (D11).
+
+| Gap | Waits on | Found in |
+|---|---|---|
+| Whether an operator converting X12 is a health care clearinghouse, and what follows | C1–C3, counsel | D10 §1 |
+| Whether the vendor is a clearinghouse when it converts X12 for a customer under a managed service | C4, counsel | D10 §1 |
+| Whether the summary of the 2024 Part 2 rule, and its compliance date, are right | P1, counsel | D10 §2.1 |
+| How Part 2 records are kept apart: an intake of their own, or labels in a shared pipeline | P2, counsel and the product's owner | D10 §2.3 |
+| Whether the product helps readers attach Part 2's redisclosure notice | P3, the product's owner | D10 §2.3 |
+| Confidentiality labels read only from C-CDA, not other formats | P2 and P3 first: whether labels are relied on at all | D10 §2.2, §4 |
+| The vendor's role, under this document and under a managed service | V1, the product's owner and counsel | D11 §1.3 |
+| Fix times, supported releases, advisories, rescans | V2–V5, the product's owner | D11 §2 |
+| A reporting channel and a disclosure policy | V6–V7, the product's owner and counsel | D11 §3 |
+| Where releases are published, and built in CI with provenance | V8; also §3 below | D11 §1.4 |
+| CISA's secure software development attestation, for federal buyers | V9; also §3 below, since it attests the build process | D11 §4; HIPAA.md §8.4 |
+| FIPS 140 mode: not supported, untested | V10, the product's owner; then HIPAA.md P8 | D11 §1.4; HARDENING.md |
+| Rules cited but not checked against their primary sources: § 160.103, Part 162, § 164.500(b), 42 CFR Part 2 as revised in 2024 | counsel, or a check against eCFR and the Federal Register first | D10 Sources; HIPAA.md §9 |
+| Buyers' requirements beside HIPAA (NIST SP 800-53, MARS-E, IRS Publication 1075) | a buyer naming them | HIPAA.md §8.4, §11.3 |
+
+## 3. Waiting on the production build pipeline
+
+**The project is a proof of concept, outside the company's standard development process.** Its builds don't run in
+the standard CI pipeline, and they don't go through the static and dynamic security scans that process includes.
+The build tooling here (`scripts/sign-release.sh`, `scripts/vuln-scan.sh`, `scripts/base-images.sh`) stands in for
+it, on a workstation. Once the build is incorporated into the production pipeline, every gap below is to be closed
+there, and D11 §1 and each kit's "Verify what you received" revised to describe what the production pipeline does.
+
+| Gap | To do in the production pipeline | Found in |
+|---|---|---|
+| No static analysis (SAST) of the code | the standard process's static scans, on every build of every module and of the transform stage's repository | D11 §1.4 |
+| No dynamic scans (DAST) | the standard process's dynamic scans, of the control API and the push intake on a running pipeline | this register; HIPAA.md P13 is the customer's own pen test, not this |
+| No secrets scanning of the code | the standard process's secrets scanning | D11 §1.4 |
+| Builds and signing on a workstation, so no build provenance (SLSA) | builds and signing in CI, with a provenance attestation beside each image's SBOM; the signing key stays in Key Vault | D11 §1.4 |
+| The transform stage isn't built, scanned or signed by `sign-release.sh` | all four stages released by the same pipeline; until then, add it to the script if a release is cut from the PoC | D11 §1.4 |
+| No release has been published: no release registry, nowhere for tarballs, signatures and `cosign.pub` | the production pipeline's registry and publication | D11 §1.4; DESIGN.md §14.4 |
+| No release notes | release notes with a release, under fixed headings: a contract major version, a table, a compliance check, a setting | UPGRADES.md §7 |
+| No rescans of released SBOMs | the pipeline's scheduled rescans of supported releases (V5) | D11 §2 |
+| No VEX statements for findings the product can't reach | published with the SBOMs (V4); the reasons in `docker/vuln-accepted.yaml` are their start | D11 §2 |
+
+## 4. Waiting on the managed service agreements
+
+The managed service's agreements decide these. The documents here are written for a customer that operates the
+product, so each needs a counterpart, or a change, for a managed service.
+
+| Gap | What the agreements must settle | Found in |
+|---|---|---|
+| The vendor is a business associate under a managed service, and its staff may see PHI | the BAA, its subcontractors (the cloud, KMS, object store and broker providers), and which of the vendor's staff may reach PHI, with access reviewed as IDENTITY.md sets out | HIPAA.md §1; D11 §1.3 |
+| The operator's duties become the vendor's, or are shared | which of HIPAA.md §10's "customer" column, and of HIPAA-OPERATIONS.md, the vendor carries: risk analysis, audit review, incident response, breach notice to the customer (§ 164.410), backups and the restore drill, retention and erasure at the end of a contract | HIPAA.md §8.3, §10 |
+| The vendor may be a clearinghouse for a customer whose X12 it converts | C4 | D10 §1 |
+| Who holds the keys | whether the KEKs are in the customer's KMS or the vendor's; KEYS.md assumes the customer's | KEYS.md; D11 §1.3 |
+| The "service" images (Ubuntu, with a shell) run only the vendor's own hosted service | whether the managed service runs the customer images instead, hardened as HARDENING.md sets out | DESIGN.md §14.1 |
+| Upgrades and fix times | the vendor applying fixes itself, within the proposed Security Rule's windows, rather than releasing them for a customer to apply | UPGRADES.md §6; D11 V2 |
+| A pipeline per customer | each customer's pipeline isolated as HIPAA-OPERATIONS.md §2.8 sets out, with keys and readers of its own | D10 §3 |
+| Part 2 records | which way of keeping them apart the service offers (P2), and who applies Part 2's notice and limits | D10 §2 |
+
+## 5. Product gaps that can be built now
+
+Each needs only the product's owner to schedule it.
+
+| Gap | Change owed | Found in |
+|---|---|---|
+| The control Deployments aren't checked for version | refuse a control pod whose release isn't its workers' | UPGRADES.md §7 |
+| No check that a token came from an MFA sign-in | a setting naming the required `acr` values or `amr` methods, enforced under the profile | IDENTITY.md §9 |
+| A pipeline's stages share one database role | a role per stage, with rights on its own tables only | IDENTITY.md §9 |
+| The CLI applies no permissions | permissions in the CLI, or the CLI refused under the profile except for break-glass | IDENTITY.md §9 |
+| `kafka-acls.sh` grants nothing to gold readers | a `reads` entry for a reader | IDENTITY.md §9 |
+| `audit-verify` checks seals against the current signing key only | earlier keys accepted by `kid` | KEYS.md §8 |
+| A stage's signing key or inbox key can be replaced only by draining | a second key accepted for the length of a replacement | KEYS.md §8 |
+| The OTLP export carries no chain ID or sequence number | `sdh.chain_id` and the entry's sequence on each exported record | AUDIT-EVENTS.md §9 |
+| Events before the journal opens are capped at 1,000 | wait, as the open journal does | AUDIT-EVENTS.md §9 |
+| `Location` and `resultAt` ignore the ingress's prefix | a public base path setting, or `X-Forwarded-Prefix` | CONTROL-API-DEPLOYMENT.md §9 |
+| Client certificates aren't checked for revocation | CRL or OCSP | CONTROL-API-DEPLOYMENT.md §9 |
+| The kits' Deployments mount a service account token | `automountServiceAccountToken: false`, tried with Pod Identity | HARDENING.md §6 |
+| The push intake has no rate or connection limit of its own | a limit in the product, or the load balancer's stays required | NETWORK.md §9 |
+| `deploy/reference/` sets no retention, and the profile requires none | retention and bounds in the reference settings, and a compliance check | RETENTION.md §8 |
+| A purge is asked stage by stage, and leaves the item's failures and ledger entry | a pipeline-wide purge, and what it leaves decided (HIPAA.md P4) | RETENTION.md §8 |
+| An erasure certificate names only the KEKs in use at the erasure | the retired KEKs older backups need, named too | RETENTION.md §8 |
+| The product can't tell a Part 2 record | none, unless P2 or P3 asks for one | D10 §4 |
+
+## 6. Tests owed
+
+| Test | Where it can run | Found in |
+|---|---|---|
+| Formats beyond C-CDA and CSV at the pipeline level: X12, EDIFACT, delimited, XML, FHIR, Parquet | locally or the sandbox | D10 §4; DEPLOYMENT.md, "Formats" |
+| The release before run against tables a newer release made | locally | UPGRADES.md §7 |
+| A whole-pipeline upgrade timed at size | the AWS session (HIPAA.md §11.4), with its cost approved | UPGRADES.md §7 |
+| The transform stage's control API deployed, and through an ingress | the sandbox | CONTROL-API-DEPLOYMENT.md §9 |
+| A control Deployment of each kind on one stage, tokens and certificates | the sandbox | CONTROL-API-DEPLOYMENT.md §9 |
+| The network policies on a cloud deployment, and through an egress proxy | the AWS session | NETWORK.md §9 |
+| Signed-image admission, a CIS benchmark, an external secret store, Object Lock | the sandbox or the AWS session | HARDENING.md §6 |
+| A harness scenario that waits for retention to delete rows | locally | RETENTION.md §8 |
+| A cryptographic erase rehearsed: a KEK destroyed, then a restore from an older backup tried | the sandbox | RETENTION.md §8 |
+| The restore drill at size, and the other steps of the AWS session | the AWS session | HIPAA.md §11.4 (A1, A3, A4) |
+| The transports still untested | as each environment is prepared | HIPAA.md P11 |
+
+## 7. The AWS PoC
+
+The PoC holds synthetic data only. What it would need before real PHI is HIPAA.md §8.5, with what the security
+documents found: public subnets and the KMS's public endpoint (NETWORK.md §9), the API server's audit log and
+PgBouncer's connection logging off, and node root disk encryption unchecked (HARDENING.md §6).
+
+## Keeping it up
+
+When a document finds a gap, add it here with where it was found; when one is closed, remove it, and say so in the
+document that found it. When a review answers a question in §2, or the production pipeline or a managed service
+agreement settles a row of §3 or §4, move what is left of it to §5 or §6, or remove it.

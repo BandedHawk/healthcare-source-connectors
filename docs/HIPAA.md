@@ -99,6 +99,11 @@ insurers, and the agents of either.
   and a subcontractor where the customer is itself one, only if we create, receive, maintain or transmit their PHI.
   - That happens if we host the product for them (the "service" images, DESIGN §14.1).
   - It also happens if our support staff are given PHI.
+- **We will also offer managed services using this pipeline,** under separate agreements. There we operate the
+  pipeline and are the customer's business associate, and our obligations and the customer's are reshaped around
+  that relationship. This document and the security documents are written for a customer that operates the
+  product, and are meant to shape the managed service offering, and its customer documentation, as well
+  ([security/KNOWN-GAPS.md](security/KNOWN-GAPS.md) §4).
 - **Our obligations are contractual and practical.** The product must either meet a technical requirement itself,
   or give the operator the capability and the configuration to meet it. We must also tell the operator which of
   the two applies, and how.
@@ -804,6 +809,12 @@ The work still owed before a customer can run the product on real PHI, after the
 
 [CONTROL-API.md](CONTROL-API.md) sets out that intent.
 
+**The gaps the security documents found** are gathered in [security/KNOWN-GAPS.md](security/KNOWN-GAPS.md), by
+what each waits on: review of legal standing and the vendor's commitments (D10, D11), the production build
+pipeline, the managed service agreements, product work, or tests. The project is a proof of concept, outside the
+company's standard development process: its builds don't run in the standard CI pipeline or its static and dynamic
+security scans, and that is to be done once the build is incorporated into the production pipeline.
+
 ### 11.1 Product work
 
 | # | Work | Closes | Notes |
@@ -839,7 +850,7 @@ the audit store wiring (§2.7 there), pipeline isolation (§2.8 there), and the 
 | D7 | **Audit event catalogue** | §8.2 item 3: every event and field, for the SIEM and the activity reviews. **Written 2026-11-25:** [security/AUDIT-EVENTS.md](security/AUDIT-EVENTS.md); `AuditEventsCatalogueTest` checks it lists every event the code emits and every control API operation. Found: the OTLP export carries no chain ID (HIPAA-OPERATIONS.md §3.2 corrected), and events before the journal opens are capped at 1,000. |
 | D8 | **Backup, restore and disaster recovery** | §8.2 item 4, from P7: what to back up, how often, how to restore, the RTO and RPO it gives. **Written 2026-11-24:** HIPAA-OPERATIONS.md §7; the RTO at size awaits the drill (§11.4, A3). |
 | D9 | **Retention and destruction** | §8.2 item 6, completed with P4: what each removal deletes and what it leaves (backups, logs). **Written 2026-11-25:** [security/RETENTION.md](security/RETENTION.md); `RetentionGuideTest` checks it names every retention setting with its default, every command a data or audit admin runs, and every claim of the erasure certificate. Found: nothing is removed unless the customer sets it (`deploy/reference/` sets no retention or bounds, and the profile requires none), a purge is asked stage by stage, a purge leaves the item's failures and ledger entry, an erasure certificate names only the KEKs in use at the erasure, no harness scenario waits for retention to delete rows, and no cryptographic erase has been rehearsed (§8 there). CONFIGURATION.md §8's retention row for convert and transform corrected. |
-| D10 | **The clearinghouse question and Part 2** | §8.2 item 7: when X12 conversion may make the operator a clearinghouse; how to keep Part 2 records apart (§2.8 there, P9). **Drafted 2026-11-25:** [security/CLEARINGHOUSE-PART2.md](security/CLEARINGHOUSE-PART2.md), not yet for customers: six questions for counsel and the product owner (C1–C3 on the clearinghouse definition and its consequences, P1–P3 on the 2024 Part 2 rule, which way to keep Part 2 records apart, and the redisclosure notice). Found: the X12 converter is tested only by unit tests, only C-CDA's labels are read, and the product can't tell a Part 2 record. |
+| D10 | **The clearinghouse question and Part 2** | §8.2 item 7: when X12 conversion may make the operator a clearinghouse; how to keep Part 2 records apart (§2.8 there, P9). **Drafted 2026-11-25:** [security/CLEARINGHOUSE-PART2.md](security/CLEARINGHOUSE-PART2.md), not yet for customers: seven questions for counsel and the product owner (C1–C3 on the clearinghouse definition and its consequences, C4 on the vendor's managed service, P1–P3 on the 2024 Part 2 rule, which way to keep Part 2 records apart, and the redisclosure notice). Found: the X12 converter is tested only by unit tests, only C-CDA's labels are read, and the product can't tell a Part 2 record. |
 | D11 | **The vendor's security commitments** | §8.2 item 8: vulnerability scanning, how quickly fixes are released, signed images and SBOMs, how to report a vulnerability. **Drafted 2026-11-25:** [security/VENDOR-COMMITMENTS.md](security/VENDOR-COMMITMENTS.md), not yet for customers: what every release has today, and ten commitments for the product owner (V1–V10: fix times, supported releases, advisories, rescans, reporting, disclosure policy, publication and CI, the secure development attestation, FIPS). Found: the transform stage isn't in the release script, no release has been published, releases are signed on a workstation with no provenance, and no static analysis or secrets scanning runs. |
 | D12 | **Upgrades and patching** | How to take a release and its fixes without losing data (DEPLOYMENT.md, "Upgrading"), and how quickly. **Written 2026-11-25:** [security/UPGRADES.md](security/UPGRADES.md); `UpgradeGuideTest` checks it names every way the drain check lets a release in, that every stage Deployment in the kits' READMEs adds a pod before taking one away, and that no stage's code drops, renames or retypes a table or column. Found: there are no release notes, going back across a table change is untested, a whole-pipeline upgrade has not been timed at size, and the control Deployments aren't checked for version (§7 there). HIPAA-OPERATIONS.md §7.1 told operators to drain a stage before changing its version, which leaves its new pods held; corrected. |
 | D13 | **Control API deployment and use** | With P1: how to expose it, connect it to the identity provider, map the permissions, and register operators' sealing keys. **Written 2026-11-25:** [security/CONTROL-API-DEPLOYMENT.md](security/CONTROL-API-DEPLOYMENT.md); `ControlDeploymentGuideTest` checks it describes every control API setting. Found: the transform stage's control API has never been deployed (its kit's README section added), `Location` ignores the ingress's prefix, client certificates aren't checked for revocation, and no ingress has been tried (§9 there). |
@@ -879,6 +890,9 @@ mode (P8), which runs locally. The penetration test (P13), which is the customer
 These aren't the product's, but no deployment holds real PHI until they are done:
 - **Buyers' requirements beside HIPAA (§8.4):** none was checked against its source. Check them when a buyer names
   them: NIST SP 800-53 mapping, MARS-E, IRS Publication 1075, the CISA secure-development attestation.
+- **Our build and release process:** the PoC is outside the company's standard process, so its static and dynamic
+  security scans, secrets scanning, and building and signing in the standard CI pipeline, come when the build is
+  incorporated into the production pipeline ([security/KNOWN-GAPS.md](security/KNOWN-GAPS.md) §3).
 - **Our AWS PoC (§8.5):** a BAA, private subnets, TLS, CloudTrail data events, bucket versioning, KMS rotation, and
   the collector's IAM role. All are only needed if we put real PHI on it.
 - **The operator's own duties (§8.3):** these stay the customer's.

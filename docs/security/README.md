@@ -18,5 +18,12 @@ and settings each statement comes from, so a reviewer can check it.
 | D13 | [Control API deployment and use](CONTROL-API-DEPLOYMENT.md) | written 2026-11-25; `ControlDeploymentGuideTest` checks it describes every control API setting |
 | D9 | [Retention and destruction](RETENTION.md) | written 2026-11-25; `RetentionGuideTest` checks it names every retention setting, data and audit admin command, and erasure certificate claim |
 | D12 | [Upgrades and patching](UPGRADES.md) | written 2026-11-25; `UpgradeGuideTest` checks it names every way a release is let in, that the kits' stage Deployments add a pod first, and that releases only add to their tables |
-| D10 | [The clearinghouse question and Part 2](CLEARINGHOUSE-PART2.md) | **draft** 2026-11-25: open questions C1–C3, P1–P3 for counsel and the product owner (§5 there) |
+| D10 | [The clearinghouse question and Part 2](CLEARINGHOUSE-PART2.md) | **draft** 2026-11-25: open questions C1–C4, P1–P3 for counsel and the product owner (§5 there) |
 | D11 | [The vendor's security commitments](VENDOR-COMMITMENTS.md) | **draft** 2026-11-25: open questions V1–V10 for the product owner and counsel (§4 there) |
+
+**Internal:** [KNOWN-GAPS.md](KNOWN-GAPS.md) gathers every gap these documents found, by what each waits on:
+review of legal standing and the vendor's commitments, the production build pipeline (the project is a PoC,
+outside the standard process and its static and dynamic scans), the managed service agreements, product work, or
+tests. The documents are written for a customer that operates the product; the vendor will also offer managed
+services using this pipeline, under separate agreements, and these documents are meant to shape that offering and
+its customer documentation as well.
