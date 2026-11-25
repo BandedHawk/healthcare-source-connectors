@@ -13,4 +13,5 @@ and settings each statement comes from, so a reviewer can check it.
 | D6 | [Security configuration guide](CONFIGURATION.md) | written 2026-11-25; `ConfigurationGuideTest` checks it names every compliance check |
 | D7 | [Audit event catalogue](AUDIT-EVENTS.md) | written 2026-11-25; `AuditEventsCatalogueTest` checks it lists every event |
 | D8 | Backup, restore and disaster recovery | in [HIPAA-OPERATIONS.md](../HIPAA-OPERATIONS.md) §7 |
-| D1, D4, D9–D13 | | owed (HIPAA.md §11.2) |
+| D13 | [Control API deployment and use](CONTROL-API-DEPLOYMENT.md) | written 2026-11-25; `ControlDeploymentGuideTest` checks it describes every control API setting |
+| D1, D4, D9–D12 | | owed (HIPAA.md §11.2) |

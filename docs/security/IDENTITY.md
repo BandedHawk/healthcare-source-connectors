@@ -80,7 +80,8 @@ HIPAA-OPERATIONS.md §3.2), but don't prevent it. A REST catalog with grants per
 
 ### 3.1 Through the control API: SSO, with MFA at the identity provider
 
-The control API is the way people act on a pipeline. It takes, in `sdh.control.auth`:
+The control API is the way people act on a pipeline; deploying it and connecting it to the identity provider is
+[CONTROL-API-DEPLOYMENT.md](CONTROL-API-DEPLOYMENT.md). It takes, in `sdh.control.auth`:
 
 - **`jwt` (for people):** an OIDC bearer token from the customer's identity provider, checked for signature
   (against the issuer's JWKS), issuer, audience, expiry and not-before. A token issued for longer than
