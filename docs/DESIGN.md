@@ -3219,7 +3219,7 @@ after the restore.
 |---|---|---|---|
 | The database (corrupt, deleted, a bad migration) | Postgres to just before; the store as it is | **Nothing landed.** Work since T is done again | The database's restore, then the check's walk, then catching up |
 | Objects in the store (deleted, overwritten, encrypted by an attacker) | Each to its last good version; the database as it is | Nothing, while the versions last | The walk with `--deep` |
-| A region | Postgres from its cross-region copy; the store's replica; multi-region keys | Items landed in the last replication lag (S3 Replication Time Control: 15 minutes) whose intake was in the lost region | As the first row, in the other region |
+| A region | Postgres from its cross-region copy; the store's replica, reached under the catalog's bucket names (on AWS, a Multi-Region Access Point; HIPAA-OPERATIONS.md §7.3; untried, and `store-versioning` doesn't follow it yet); multi-region keys | Items landed in the last replication lag (S3 Replication Time Control: 15 minutes) whose intake was in the lost region | As the first row, in the other region |
 | Kafka | Topics made again | Nothing | The reconcilers' catch-up |
 | A KEK | None | Everything under it | |
 

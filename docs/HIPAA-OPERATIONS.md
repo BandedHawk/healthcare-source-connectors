@@ -680,7 +680,7 @@ pipeline's catching up; it has not yet been measured at size.
 | Loss | What to do |
 |---|---|
 | Objects deleted from the store, the database whole | Steps 1 and 4 to 9 above, without restoring the database: the repair brings back each deleted file the catalog needs from its versions. An overwritten object is restored to its last good version with the store's tools. |
-| A region | The database from its cross-region copy, the store's replica and multi-region keys, then the steps above in the other region. The replica must be reached under the bucket names the catalog holds, since it names each file by its full path (§7.3): plan this before you need it. Items landed within the replication's lag whose intake was in the lost region may be lost. |
+| A region | The database from its cross-region copy, the store's replica and multi-region keys, then the steps above in the other region. The replica must be reached under the bucket names the catalog holds, since it names each file by its full path: on AWS, through a Multi-Region Access Point (§7.3, "A region on AWS"). Plan this before you need it; it is untried, and the `store-versioning` check doesn't yet follow the access point. Items landed within the replication's lag whose intake was in the lost region may be lost. |
 | Kafka | Make the topics again and start the stages: the reconcilers rebuild what was in flight. |
 | A KEK destroyed | Nothing under it can be read again. Keys are never deleted while a backup needs them (§8). |
 
@@ -895,12 +895,45 @@ last, after everything is re-keyed:
 | **To a new KEK in the same KMS provider** (another key, account or region) | Rotate and re-key, as §6.1, with the new key granted to the stage and its readers; then the checklist above for the old one | A KEK in another account or region has not been tried with the re-key; try it on a throwaway pipeline first |
 | **To another KMS provider** (AWS KMS to Vault, say) | **Not supported:** a stage wraps with one provider (`sdh.crypto.wrap-provider`), so a re-key can't cross providers | Keep the old provider, and its keys, for as long as anything is under them |
 | **The database** (another server, a managed service, a major version) | Pause and drain every stage; a full dump and restore, or the provider's own migration; point the stages at it; then `restore-check` on each (§7, step 4) | The database and the store must be from the same moment: move it with every stage paused, and keep the old one until the check passes |
-| **The object store** (another bucket, store or cloud) | **Not supported yet:** Iceberg's catalog and metadata name each file by its full path, bucket included, so tables copied to another bucket aren't found at the new name | Keep the same endpoint name and bucket names at the new store, where it allows that (a self-hosted store behind the same DNS name); otherwise ask the vendor |
+| **The object store, to another region on AWS** | Through a Multi-Region Access Point, below: the tables keep their paths | Untried; the `store-versioning` check needs a fix first |
+| **The object store** (another bucket, store or cloud) | **Not supported yet:** Iceberg's catalog and metadata name each file by its full path, bucket included, so tables copied to another bucket aren't found at the new name. A `relocate` command is planned (below) | Keep the same endpoint name and bucket names at the new store, where it allows that (a self-hosted store behind the same DNS name); otherwise ask the vendor |
 | **To another cloud account** | The three rows above, in order: database, store, then the keys re-keyed into the new account | Close the old account only after the checklist above passes for every key in it |
 
 A copy of a pipeline's data elsewhere (a store replica, a database copy, a backup taken off site) is still under
 the same KEKs. It is only as recoverable as those keys are where you would restore it: grant them, or replicate
 them (multi-Region keys, Vault snapshots), to every place you might restore to.
+
+**A region on AWS.** S3 bucket names are global, so a bucket in another region always has another name, and a plain
+copy leaves every path in the catalog pointing at the old bucket. The way round it is to leave the paths alone and
+change where they lead:
+1. Replicate each pipeline bucket to a bucket in the other region with S3 Cross-Region Replication, **both ways**,
+   with delete markers and replica modifications replicated, so that whichever region is live, the other gets its
+   writes, deletions and versions.
+2. Put a Multi-Region Access Point in front of each pair, with failover controls (one region active, the other
+   passive), and the multi-Region KEKs (above) in both.
+3. In each stage's catalog properties, map each bucket name to its access point:
+   `s3.access-points.<bucket>: <access point ARN>`, and `s3.use-arn-region-enabled: true`. The stages pass these
+   to Iceberg's S3FileIO as they are, so the tables' files are reached through the access point under their old
+   names.
+4. To fail over, shift the access point's traffic to the other region, bring up the database there (§7,
+   "Other losses"), and start the stages.
+
+**Not yet tried.** Two things are known or likely to fail: the `store-versioning` check asks for the bucket by its
+own name and doesn't follow the mapping, so under the `hipaa` profile the stages would refuse to start with the
+first region down (a product fix, KNOWN-GAPS.md §5); and the restore repair lists object versions through the
+FileIO, which an access point may not allow. Both are to be tried in the AWS session (KNOWN-GAPS.md §6) before
+anyone relies on this.
+
+**Another bucket, store or cloud (planned).** A move to a place with other names needs each table's metadata
+rewritten with the new paths. The plan is a `relocate` command on each stage, in pipeline order, with four eyes:
+pause and drain the stage; rewrite each table's metadata with Iceberg's own path rewrite (`RewriteTablePathUtil`,
+in the library the stages already use), which also lists the files to copy; copy them with the store's tools or
+the command; point the catalog and the stage's `warehouse` at the new place; `restore-check`; resume. Nothing is
+encrypted again: a chunk's encryption binds its item, record and chunk, not its path. Until it is built, ask the
+vendor. Whichever way a store moves:
+- **Old versions don't move.** The new bucket starts with no history, so the database's point-in-time window
+  starts again at the move: keep the old bucket, its versions and its keys for a full recovery window.
+- **A move to another cloud is usually a move to another KMS provider too**, which a re-key can't do yet (above).
 
 ## 8. Retention, disposal and end of contract (§ 164.310(d), § 164.504(e)(2)(ii)(J))
 
