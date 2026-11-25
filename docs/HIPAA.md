@@ -606,8 +606,10 @@ The outstanding work is restated, with what's decided since, in §11.
 
 ### 8.2 Documentation we owe customers
 
-Items 1, 3 (in part), 4 (the break-glass part) and 6 are now in §10 and
-[HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md); the others are still owed.
+Items 1, 4 (the break-glass part) and 6 are now in §10 and [HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md), item 2
+in [security/CONFIGURATION.md](security/CONFIGURATION.md), item 3 in
+[security/AUDIT-EVENTS.md](security/AUDIT-EVENTS.md) and item 5 in [security/DATA-FLOWS.md](security/DATA-FLOWS.md);
+the others are still owed.
 
 1. **A HIPAA shared-responsibility matrix.** This is §3–§5 restated per specification: met by the product,
    capability the operator configures, or the operator's alone.
@@ -832,9 +834,9 @@ the audit store wiring (§2.7 there), pipeline isolation (§2.8 there), and the 
 | D2 | **Identity and access architecture** | A workload identity per stage, with no static keys. Human access through SSO with MFA. The API's permissions mapped to the customer's roles (P1). Break-glass accounts. Access reviews, and leavers. |
 | D3 | **Key management architecture** | The key hierarchy: KEKs per pipeline and layer, signing keys, inbox keys, the ID key, consumer keys, operator keys. Who holds each. Key policies. Rotation, re-keying (P3) and destruction. |
 | D4 | **Platform hardening baseline** | Kubernetes: the restricted Pod Security Standard, Secrets encrypted at rest (or an external secret store), the API server's audit log, signed-image admission, a CIS benchmark for the nodes, with no swap, no kernel crash dumps and encrypted volumes (HIPAA-OPERATIONS §2.9). Encryption at rest and logging for Postgres, Kafka and the object store, and bucket versioning or object lock. |
-| D5 | **Data flows and where PHI is** | §8.2 item 5: each stage, what it holds and in what form, for the risk analysis and the asset inventory. |
-| D6 | **Security configuration guide** | §8.2 item 2: every setting that bears on HIPAA, its safe value and what it does, starting from `deploy/reference/`. |
-| D7 | **Audit event catalogue** | §8.2 item 3: every event and field, for the SIEM and the activity reviews. |
+| D5 | **Data flows and where PHI is** | §8.2 item 5: each stage, what it holds and in what form, for the risk analysis and the asset inventory. **Written 2026-11-24:** [security/DATA-FLOWS.md](security/DATA-FLOWS.md). |
+| D6 | **Security configuration guide** | §8.2 item 2: every setting that bears on HIPAA, its safe value and what it does, starting from `deploy/reference/`. **Written 2026-11-25:** [security/CONFIGURATION.md](security/CONFIGURATION.md); `ConfigurationGuideTest` checks it names every compliance check. |
+| D7 | **Audit event catalogue** | §8.2 item 3: every event and field, for the SIEM and the activity reviews. **Written 2026-11-25:** [security/AUDIT-EVENTS.md](security/AUDIT-EVENTS.md); `AuditEventsCatalogueTest` checks it lists every event the code emits and every control API operation. Found: the OTLP export carries no chain ID (HIPAA-OPERATIONS.md §3.2 corrected), and events before the journal opens are capped at 1,000. |
 | D8 | **Backup, restore and disaster recovery** | §8.2 item 4, from P7: what to back up, how often, how to restore, the RTO and RPO it gives. **Written 2026-11-24:** HIPAA-OPERATIONS.md §7; the RTO at size awaits the drill (§11.4, A3). |
 | D9 | **Retention and destruction** | §8.2 item 6, completed with P4: what each removal deletes and what it leaves (backups, logs). |
 | D10 | **The clearinghouse question and Part 2** | §8.2 item 7: when X12 conversion may make the operator a clearinghouse; how to keep Part 2 records apart (§2.8 there, P9). |

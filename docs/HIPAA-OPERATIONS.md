@@ -25,7 +25,16 @@ in writing (§ 164.308(a)(2), (a)(3)).
 | **Security analyst** | Reviews audit events in the SIEM, runs `audit-verify`, raises incidents. | The SIEM; `audit-verify` and `audit-export` (read-only). |
 | **Data consumer owner** | Owns each application that reads gold with `connector-queue-reader`; sets its reader name and purpose. | The `gold-reader` grant for that application only. |
 
+**Reasons and tickets.** Every action through the control API or the CLI takes a reason, and some a ticket. Both
+are kept in plain in the control tables and the audit journal, so that reviewers can read them without a key
+(docs/security/DATA-FLOWS.md §3). The API takes only letters, digits, spaces and a few marks, so a document's text
+can't be pasted in, but nothing stops a name or a record number being typed. **Never put PHI in a reason or a
+ticket:** refer to the item by its ID and to the request by the ticket system's reference.
+
 ## 2. Configuration before real PHI
+
+Every setting below, with its safe value, is also in one table per area in
+[security/CONFIGURATION.md](security/CONFIGURATION.md).
 
 ### 2.1 The compliance profile
 
@@ -327,7 +336,9 @@ queries say nothing of pruned items. Each run is audited, `stage.registry_pruned
 
 ### 3.1 Daily: the SIEM
 
-The security analyst reviews, at least:
+What each event and field means is in the audit event catalogue,
+[security/AUDIT-EVENTS.md](security/AUDIT-EVENTS.md); its rows marked **Review** are the ones below, and others
+worth an alert. The security analyst reviews, at least:
 
 - `connector.fatal`, `lease.lost`, `lease.fenced_table`, `stage.message_rejected`: possible attack or fault;
 - `compliance.waived`, `compliance.off` and `compliance.refused`;
@@ -359,9 +370,11 @@ every seal against the stage's signing key.
   `UNCLOSED` (a process that stopped without closing its chain, such as a node lost). Expected after a crash; check
   each against the platform's record of pod terminations.
 
-What it can't show: a whole chain deleted. Compare the chains `audit-verify` lists with the SIEM's copy, by
-`sdh.chain_id`, which every exported event carries. Admin runs' chains are not sealed (the admin has no stage
-signing key), so they rest on the hash chain and the SIEM copy.
+What it can't show: a whole chain deleted. Compare the chains `audit-verify` lists with a copy kept outside the
+database: the archived `audit-export` lines (§3.3), which name each event's `chain` and `seq`. The OTLP export
+doesn't carry them yet ([security/AUDIT-EVENTS.md](security/AUDIT-EVENTS.md) §9), so the SIEM's own copy can't be
+compared chain by chain. Admin runs' chains are not sealed (the admin has no stage signing key), so they rest on the
+hash chain and the copy outside.
 
 ### 3.3 Export and retention
 
