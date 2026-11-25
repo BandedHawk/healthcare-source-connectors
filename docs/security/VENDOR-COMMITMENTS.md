@@ -101,8 +101,9 @@ pipeline; they are tracked in [KNOWN-GAPS.md](KNOWN-GAPS.md) §3 until then.
 > | Medium (4.0–6.9) | in the next scheduled release, or within 90 days |
 > | Low | in a scheduled release |
 >
-> These leave the customer time inside the proposed Security Rule's windows (15 days critical, 30 high;
-> UPGRADES.md §6). Answer: *open*.
+> These leave the customer time inside the proposed Security Rule's windows: 15 calendar days for a critical
+> risk and 30 for a high one, from identifying the need to patch or from a patch becoming available (90 FR 898,
+> proposed § 164.308(a)(4)(ii)(C), checked 2026-11-25; UPGRADES.md §6). Answer: *open*.
 
 > **For review (V3): which releases get fixes.** Proposed: the latest minor release of the current major version,
 > and the latest minor release of the major version before it for 12 months after a new major version. Fixes come
@@ -144,7 +145,7 @@ SBOMs do the same (V5).
 | V6 | How is a vulnerability reported, and how quickly acknowledged and assessed? | product owner | *open* |
 | V7 | Is there a published disclosure policy, with safe harbour and a disclosure timeline? | product owner, counsel | *open* |
 | V8 | Before the first release: where are releases and `cosign.pub` published, and when is the build incorporated into the production pipeline, building and signing in CI with provenance (DESIGN.md §14.4)? | product owner | *open* |
-| V9 | For federal buyers: will the vendor give the secure software development attestation (CISA's form, under OMB M-22-18 and M-23-16), and against which practices (NIST SP 800-218)? Its status changed in 2025 and hasn't been checked (HIPAA.md §8.4) | product owner, counsel | *open* |
+| V9 | For federal buyers: will the vendor give CISA's secure software development attestation, against NIST SP 800-218, to an agency that asks? OMB M-26-05 (2026-01-23) rescinded M-22-18 and M-23-16, so agencies may ask for it but needn't, and may require a current SBOM on request instead (HIPAA.md §8.4) | product owner, counsel | *open* |
 | V10 | Is FIPS 140 support planned, and when (HIPAA.md §11.1 P8)? | product owner | *open* |
 
 ## Sources
@@ -154,3 +155,5 @@ SBOMs do the same (V5).
   POM's security overrides and `cyclonedx-maven-plugin`.
 - **Documents:** HIPAA.md §1, §8.2 item 8, §8.4, §11.1 (P8, P13); HIPAA-OPERATIONS.md §9; each kit's README,
   "Verify what you received"; HARDENING.md; KEYS.md; UPGRADES.md; KNOWN-GAPS.md.
+- **Rules and policy, checked on 2026-11-25:** the proposed Security Rule's patch windows in its Federal Register
+  text (90 FR 898, 2025-01-06); OMB M-26-05 (2026-01-23), which rescinded M-22-18 and M-23-16.

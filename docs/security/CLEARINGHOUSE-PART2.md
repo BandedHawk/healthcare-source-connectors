@@ -24,27 +24,43 @@ agent's position of §1.2 (C4). This document is meant to shape that offering to
 
 ## 1. The clearinghouse question
 
-### 1.1 What the product does to X12
+### 1.1 What the product does to standard transactions
 
-The convert stage turns each X12 record into JSON of its own shape (`x12/1`, DESIGN.md §6.4): every segment, the
-envelopes too, with each element kept as received, positions stable, composites one string. That JSON is not a
-standard transaction. No mapping in the product turns X12 into FHIR yet; a customer may write one (the transform
-stage runs any WSTL set). EDIFACT is converted the same way (`edifact/1`). C-CDA, FHIR, CSV and the other formats
-are not Part 162 standard transactions.
+**X12.** The convert stage turns each X12 record into JSON of its own shape (`x12/1`, DESIGN.md §6.4): every
+segment, the envelopes too, with each element kept as received, positions stable, composites one string. That
+JSON is not a standard transaction. No mapping in the product turns X12 into FHIR yet; a customer may write one
+(the transform stage runs any WSTL set). EDIFACT is converted the same way (`edifact/1`).
+
+**C-CDA, when it is a claims attachment.** Since 2026, a health care claims attachment is a standard transaction
+(Part 162 Subpart T, 91 FR 14350, 2026-03-24; effective 2026-05-26, compliance required by 2028-05-26). Its
+standards (§ 162.2002) are HL7's C-CDA-based attachment guide (Release 2, version 2.1.0.1) and the C-CDA Templates
+for Clinical Notes R2.1, carried in an X12 275 (006020X314) and requested by an X12 277 (006020X313). The
+product's main conversion, C-CDA into FHIR through the transform stage, is processing a standard transaction into
+nonstandard content when the C-CDA arrives as a claims attachment. The product doesn't know whether a document
+arrived as one: that depends on the intake and the source.
+
+FHIR, CSV and the other formats are not Part 162 standard transactions.
 
 X12 conversion has not been tested beyond the converter's unit tests (DEPLOYMENT.md, "Formats: what has been
 tested").
 
 ### 1.2 When the operator may be a clearinghouse
 
-> **For review (C1): the definition and its reading.** Counsel to confirm the reading below against the current
-> text of § 160.103 and § 164.500(b).
+> **For review (C1): the definition and its reading.** The text below was checked on 2026-11-25 against the
+> eCFR (current to 2026-11-23). Counsel to confirm the reading of it.
 
-A health care clearinghouse (§ 160.103, paragraph (2)) includes an entity that receives a standard transaction
-from another entity and processes or facilitates the processing of health information into nonstandard format or
-nonstandard data content for the receiving entity. Paragraph (1) covers the reverse: nonstandard information from
-another entity made into standard data elements or a standard transaction. On that reading, it turns on **whose
-transactions the operator converts, and for whom:**
+A health care clearinghouse (§ 160.103) is "a public or private entity, including a billing service, repricing
+company, community health management information system or community health information system, and
+'value-added' networks and switches", that does either of two functions. Paragraph (2): it "receives a standard
+transaction from another entity and processes or facilitates the processing of health information into
+nonstandard format or nonstandard data content for the receiving entity". Paragraph (1) covers the reverse:
+nonstandard information from another entity made into standard data elements or a standard transaction. A
+clearinghouse is a covered entity (§ 160.103, "covered entity" (2)).
+
+§ 162.930 says what a clearinghouse may do as a covered entity's business associate, and (a) reads close to the
+agent's case: "receive a standard transaction on behalf of the covered entity and translate it into a nonstandard
+transaction (for example, nonstandard format and/or nonstandard data content) for transmission to the covered
+entity". On that reading, it turns on **whose transactions the operator converts, and for whom:**
 
 | Operator | What it runs | Likely position (for counsel) |
 |---|---|---|
@@ -53,7 +69,8 @@ transactions the operator converts, and for whom:**
 | An agent serving several covered entities | a pipeline per entity | as above, for each |
 | A government agency (a hybrid entity) | a pipeline for a health care component | depends on the component; the component's PHI is kept from the others in any case (§ 164.105) |
 | The vendor, under a managed service | a pipeline per customer, converting that customer's received transactions | as an agent: the customer's business associate, and may be a clearinghouse (C4) |
-| Any operator | only C-CDA, FHIR, CSV or other non-X12 intakes | Part 162 transactions aren't involved |
+| Any operator | C-CDA received as claims attachments (from 2028-05-26 at the latest) | as for X12, by the rows above (C5) |
+| Any operator | only FHIR, CSV, or C-CDA that isn't a claims attachment | Part 162 transactions aren't involved |
 
 > **For review (C2): the agent's case.** Is an agent converting a covered entity's received X12 into JSON, or
 > into FHIR through a customer's mapping, a clearinghouse? Does it matter that the output is for the covered
@@ -62,6 +79,11 @@ transactions the operator converts, and for whom:**
 > **For review (C4): the vendor's managed service.** Where the vendor runs a pipeline for a customer that
 > converts the customer's received X12, is the vendor a clearinghouse, and what must the service's agreements
 > and isolation provide for it (§1.3)?
+
+> **For review (C5): claims attachments.** Is an agent (or the vendor, under a managed service) converting a
+> health plan's received C-CDA claims attachments into FHIR a clearinghouse, from 2028-05-26 or from when the plan
+> first receives attachments under the standard? Does it matter whether the C-CDA is still in its X12 275 when
+> the pipeline receives it?
 
 ### 1.3 What follows if it is
 
@@ -72,8 +94,10 @@ transactions the operator converts, and for whom:**
   pipeline of its own (§3), with readers of its own.
 - **Part 162** (transactions, code sets and identifiers): what it requires of a clearinghouse converting for a
   covered entity (§ 162.923(c), § 162.930).
-- **The Privacy Rule, in part** (§ 164.500(b)): a clearinghouse acting as a business associate is held to the
-  business associate's terms and only certain Privacy Rule provisions.
+- **The Privacy Rule, in part** (§ 164.500(b)(1)): a clearinghouse that creates or receives PHI as a business
+  associate of another covered entity must comply with §§ 164.500 to 164.504, 164.512, 164.532 and 164.534 only,
+  and may use or disclose PHI only as its business associate contract permits. For PHI it creates or receives
+  other than as a business associate, the whole Privacy Rule applies ((b)(2)).
 - **A business associate agreement** with each covered entity it converts for.
 
 ### 1.4 What the product supports
@@ -91,18 +115,33 @@ transactions the operator converts, and for whom:**
 
 ### 2.1 What Part 2 asks, as the product understands it
 
-> **For review (P1): the 2024 rule.** Counsel to confirm each point against the current text of 42 CFR Part 2, as
-> revised in 2024 (89 FR 12472), and its compliance date, reported as 2026-02-16 (HIPAA.md §9: unverified).
+> **For review (P1): the 2024 rule.** Each point below was checked on 2026-11-25 against 42 CFR Part 2 in the
+> eCFR (current to 2026-11-23), and the dates against the 2024 rule as published (89 FR 12472, 2024-02-16):
+> effective 2024-04-16, compliance required by **2026-02-16**, so it is in force. Counsel to confirm the reading.
 
-- Part 2 protects records of substance use disorder treatment from a federally assisted program, and what is
-  derived from them, with consent and redisclosure rules of its own beside HIPAA's.
-- Since 2024, a single consent may cover future uses for treatment, payment and health care operations, and a
-  covered entity or business associate that receives records under it may redisclose them as HIPAA allows.
-- Each disclosure made with consent carries a notice, and a copy of the consent or a summary of it.
-- Records may not be used in proceedings against the patient without consent or a court order.
-- The 2024 rule doesn't require Part 2 records to be kept apart from other records, but limits what may be done
-  with them wherever they are.
-- Breaches of Part 2 records are notified as HIPAA's Breach Notification Rule sets out.
+- **What it covers** (§ 2.12(a), (b)): records that would identify a patient as having or having had a substance
+  use disorder, and contain SUD information obtained by a federally assisted SUD program (a "part 2 program") for
+  treatment, diagnosis or referral. A program is federally assisted if, among others, it is a Medicare provider,
+  is authorised to conduct maintenance treatment or withdrawal management, or is registered to dispense controlled
+  substances for SUD treatment.
+- **A single consent for treatment, payment and health care operations** (§ 2.33(a)(2), (b)(1)): a part 2
+  program, covered entity or business associate may use and disclose records under it as the HIPAA regulations
+  permit, until the patient revokes it in writing; a covered entity or business associate that receives them may
+  redisclose them as HIPAA allows, except for proceedings against the patient.
+- **A notice with each disclosure made with consent** (§ 2.32): one of two statements the section gives, and a
+  copy of the consent or a clear explanation of its scope.
+- **Proceedings against the patient** (§ 2.12(a)(2), § 2.32, §§ 2.64–2.65): records may not be used or
+  disclosed in civil, criminal, administrative or legislative proceedings against the patient without the
+  patient's consent or a court order under subpart E, and not to bring or substantiate criminal charges.
+- **Keeping records apart** (§ 2.12(d)(2)(i)(C)): a part 2 program, covered entity or business associate that
+  receives records under a single consent for treatment, payment and health care operations "is not required to
+  segregate or segment such records". Part 2 limits what may be done with them wherever they are.
+- **Security** (§ 2.16(a)): a part 2 program or other lawful holder must have formal policies and procedures
+  against unauthorised use and disclosure, covering for electronic records their creation, receipt, maintenance
+  and transmission, destruction (sanitising the media so the information is not retrievable), access, and
+  de-identification to § 164.514(b).
+- **Breaches** (§ 2.16(b)): the Breach Notification Rule applies to part 2 programs for breaches of unsecured
+  records as it applies to covered entities.
 
 ### 2.2 What the product knows about a record
 
@@ -168,8 +207,11 @@ Then record, in the operator's documentation, which pipeline holds what, for who
 - **The product doesn't know a record's Part 2 status,** and carries no sensitivity label: separating Part 2
   records rests on the source (way A) or on its labels (way B).
 - **Only C-CDA's labels are read.** No other format's confidentiality coding is.
-- **The 2024 Part 2 rule, its compliance date, and § 160.103's clearinghouse paragraphs have not been checked
-  against their primary sources** for this draft (HIPAA.md §9).
+- **C-CDA claims attachments became a standard transaction in 2026** (Part 162 Subpart T, compliance by
+  2028-05-26), so the clearinghouse question reaches the product's main conversion, not only X12 (§1.1, C5). The
+  product can't tell an attachment from any other C-CDA document, and no intake receives an X12 275.
+- **The rules were checked against their primary sources on 2026-11-25** (Sources); what they mean for a given
+  operator is still counsel's (C1–C5, P1).
 
 ## 5. Open questions
 
@@ -179,7 +221,8 @@ Then record, in the operator's documentation, which pipeline holds what, for who
 | C2 | Is an agent converting a covered entity's received X12 into JSON or FHIR, for that entity's own use, a clearinghouse? | counsel | *open* |
 | C3 | Are §1.3's consequences right, and complete (Part 162, § 164.500(b), isolation, the BAA)? | counsel | *open* |
 | C4 | Under a managed service converting a customer's received X12, is the vendor a clearinghouse, and what must the agreements and isolation provide? | counsel, product owner | *open* |
-| P1 | Is §2.1's summary of the 2024 Part 2 rule right, and is its compliance date 2026-02-16? | counsel | *open* |
+| C5 | Is converting a health plan's received C-CDA claims attachments into FHIR a clearinghouse function, and from when? | counsel | *open* |
+| P1 | Is §2.1's reading of the 2024 Part 2 rule right? (Its text and dates were checked: compliance required by 2026-02-16.) | counsel | *open* |
 | P2 | Way A (an intake of its own) as the recommendation, with way B allowed where sources label every record? | counsel, product owner | *open* |
 | P3 | Should the product add anything to help readers with Part 2's redisclosure notice, or leave it to them? | product owner | *open* |
 
@@ -190,5 +233,8 @@ Then record, in the operator's documentation, which pipeline holds what, for who
   `PipelineIsolationIT`.
 - **Documents:** HIPAA.md §1 (the clearinghouse question), §4.5 (Part 2), §9 (what wasn't checked), §11.1 P9;
   HIPAA-OPERATIONS.md §2.8; DATA-FLOWS.md; RETENTION.md; KNOWN-GAPS.md.
-- **Rules, not checked for this draft:** 45 CFR § 160.103 ("health care clearinghouse"), § 162.923, § 162.930,
-  § 164.105, § 164.308(a)(4)(ii)(A), § 164.500(b); 42 CFR Part 2 as revised by 89 FR 12472 (2024).
+- **Rules, checked on 2026-11-25:** 45 CFR § 160.103 ("health care clearinghouse", "covered entity"), § 162.923,
+  § 162.930, Part 162 Subpart T (§§ 162.2001, 162.2002), § 164.105, § 164.308(a)(4)(ii)(A), § 164.500(b), and
+  42 CFR Part 2 (§§ 2.12, 2.16, 2.32, 2.33), all in the eCFR through its API, current to 2026-11-23
+  (`ecfr.gov/api/versioner/v1/full/2026-11-23/...`); the dates of 89 FR 12472 (2024-02-16) and of 91 FR 14350
+  (2026-03-24, claims attachments) in their Federal Register text (`federalregister.gov`).

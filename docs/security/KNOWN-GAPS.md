@@ -32,7 +32,8 @@ changed. The questions are in [CLEARINGHOUSE-PART2.md](CLEARINGHOUSE-PART2.md) �
 |---|---|---|
 | Whether an operator converting X12 is a health care clearinghouse, and what follows | C1–C3, counsel | D10 §1 |
 | Whether the vendor is a clearinghouse when it converts X12 for a customer under a managed service | C4, counsel | D10 §1 |
-| Whether the summary of the 2024 Part 2 rule, and its compliance date, are right | P1, counsel | D10 §2.1 |
+| Whether converting received C-CDA claims attachments into FHIR is a clearinghouse function: a Part 162 standard transaction since 2026, compliance by 2028-05-26 | C5, counsel | D10 §1.1; HIPAA.md §1 |
+| Whether D10's reading of the 2024 Part 2 rule is right (its text and dates were checked) | P1, counsel | D10 §2.1 |
 | How Part 2 records are kept apart: an intake of their own, or labels in a shared pipeline | P2, counsel and the product's owner | D10 §2.3 |
 | Whether the product helps readers attach Part 2's redisclosure notice | P3, the product's owner | D10 §2.3 |
 | Confidentiality labels read only from C-CDA, not other formats | P2 and P3 first: whether labels are relied on at all | D10 §2.2, §4 |
@@ -40,9 +41,10 @@ changed. The questions are in [CLEARINGHOUSE-PART2.md](CLEARINGHOUSE-PART2.md) �
 | Fix times, supported releases, advisories, rescans | V2–V5, the product's owner | D11 §2 |
 | A reporting channel and a disclosure policy | V6–V7, the product's owner and counsel | D11 §3 |
 | Where releases are published, and built in CI with provenance | V8; also §3 below | D11 §1.4 |
-| CISA's secure software development attestation, for federal buyers | V9; also §3 below, since it attests the build process | D11 §4; HIPAA.md §8.4 |
+| CISA's secure software development attestation, for federal buyers: no longer required since OMB M-26-05, but agencies may ask for it, or for an SBOM | V9; also §3 below, since it attests the build process | D11 §4; HIPAA.md §8.4 |
 | FIPS 140 mode: not supported, untested | V10, the product's owner; then HIPAA.md P8 | D11 §1.4; HARDENING.md |
-| Rules cited but not checked against their primary sources: § 160.103, Part 162, § 164.500(b), 42 CFR Part 2 as revised in 2024 | counsel, or a check against eCFR and the Federal Register first | D10 Sources; HIPAA.md §9 |
+| The 2026 Privacy Rule changes (91 FR 74848, compliance by 2027-07-19) reviewed beyond access: access requests then answered within 15 calendar days (now 30), so the operator's lookup procedure (HIPAA-OPERATIONS.md §4.1, one run per 31 days asked for) needs checking against it | counsel, and a review of the procedures | HIPAA.md §2, §4.2, §9 |
+| Still unchecked against primary sources: the Security Rule NPRM's proposals beyond patching, *Purl v. HHS*, HHS's cloud computing guidance | a check, then counsel | HIPAA.md §9 |
 | Buyers' requirements beside HIPAA (NIST SP 800-53, MARS-E, IRS Publication 1075) | a buyer naming them | HIPAA.md §8.4, §11.3 |
 
 ## 3. Waiting on the production build pipeline
@@ -76,6 +78,7 @@ product, so each needs a counterpart, or a change, for a managed service.
 | The operator's duties become the vendor's, or are shared | which of HIPAA.md §10's "customer" column, and of HIPAA-OPERATIONS.md, the vendor carries: risk analysis, audit review, incident response, breach notice to the customer (§ 164.410), backups and the restore drill, retention and erasure at the end of a contract | HIPAA.md §8.3, §10 |
 | The vendor may be a clearinghouse for a customer whose X12 it converts | C4 | D10 §1 |
 | Who holds the keys | whether the KEKs are in the customer's KMS or the vendor's; KEYS.md assumes the customer's | KEYS.md; D11 §1.3 |
+| FedRAMP, for a managed service offered to federal agencies; and an SBOM of the runtime production environment, which OMB M-26-05 lets agencies require of a cloud platform | the authorisation the service needs, and how runtime SBOMs are produced | HIPAA.md §8.4 |
 | The "service" images (Ubuntu, with a shell) run only the vendor's own hosted service | whether the managed service runs the customer images instead, hardened as HARDENING.md sets out | DESIGN.md §14.1 |
 | Upgrades and fix times | the vendor applying fixes itself, within the proposed Security Rule's windows, rather than releasing them for a customer to apply | UPGRADES.md §6; D11 V2 |
 | A pipeline per customer | each customer's pipeline isolated as HIPAA-OPERATIONS.md §2.8 sets out, with keys and readers of its own | D10 §3 |
@@ -104,6 +107,7 @@ Each needs only the product's owner to schedule it.
 | A purge is asked stage by stage, and leaves the item's failures and ledger entry | a pipeline-wide purge, and what it leaves decided (HIPAA.md P4) | RETENTION.md §8 |
 | An erasure certificate names only the KEKs in use at the erasure | the retired KEKs older backups need, named too | RETENTION.md §8 |
 | The product can't tell a Part 2 record | none, unless P2 or P3 asks for one | D10 §4 |
+| The product can't tell a C-CDA claims attachment from another C-CDA document, and has no intake for an X12 275 | depends on C5: an intake or a mark for attachments, if their pipeline must be kept apart | D10 §1.1, §4 |
 
 ## 6. Tests owed
 

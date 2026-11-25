@@ -176,10 +176,11 @@ A major version of PostgreSQL or the broker is a change of its own: back up firs
 isn't production. DEPLOYMENT.md, "Transports: what has been tested", lists what the product has been run against.
 
 **How quickly.** HIPAA leaves the schedule to the covered entity's risk analysis (§ 164.308(a)(1)(ii)(B)). The
-proposed Security Rule would require patches within 15 calendar days for a critical risk and 30 for a high one,
-and a review of the patch process every 12 months; it is not final, and its text has not been checked here
-(HIPAA.md §7). Set the windows in your policy, by severity, and measure them from the release that carries the fix.
-How quickly the vendor releases a fix is D11's.
+proposed Security Rule (90 FR 898, proposed § 164.308(a)(4)(ii)(B)–(C), checked 2026-11-25) would require
+patches within 15 calendar days of identifying the need for a critical risk and 30 for a high one (or of a patch
+becoming available, where none is yet), and a review and test of the patch policy every 12 months; it is not
+final (HIPAA.md §2, §7). Set the windows in your policy, by severity, and measure them from the release that
+carries the fix. How quickly the vendor releases a fix is D11's.
 
 ## 7. Findings
 
@@ -188,8 +189,9 @@ How quickly the vendor releases a fix is D11's.
   release (§2).
 - **Going back across a table change is untested.** The tables only gain columns, and `UpgradeGuideTest` holds the
   code to that, but no test runs the release before against tables a newer release made.
-- **A whole-pipeline upgrade has not been timed at size.** The sandbox shows a held release let in within a minute; no run at the AWS PoC's size has timed a pause, empty, deploy and resume (PERFORMANCE.md §8 saw only a
-  release held after an outage).
+- **A whole-pipeline upgrade has not been timed at size.** The sandbox shows a held release let in within a
+  minute; no run at the AWS PoC's size has timed a pause, empty, deploy and resume (PERFORMANCE.md §8 saw only
+  a release held after an outage).
 - **The control Deployments aren't checked for version.** A control pod of one release beside workers of another is
   not refused; deploy them together (§3, step 5).
 - **The documents said to drain a stage before changing its version.** HIPAA-OPERATIONS.md §7.1 told operators to

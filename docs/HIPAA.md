@@ -127,22 +127,26 @@ insurers, and the agents of either.
   its own right. That brings Part 162 (§ 162.923(c)), the required "isolating health care clearinghouse
   functions" (§ 164.308(a)(4)(ii)(A)), and part of the Privacy Rule (§ 164.500(b)).
 - **What the product supports:** a pipeline per function, with its own keys and readers (§8.1, item 9).
-- C-CDA, FHIR and CSV are not Part 162 standard transactions.
+- **C-CDA claims attachments are now a standard transaction** (Part 162 Subpart T, 91 FR 14350, 2026-03-24;
+  compliance required by 2028-05-26): HL7's C-CDA-based attachment guide, carried in an X12 275. Converting a
+  received attachment into FHIR may be a clearinghouse function in the same way (security/CLEARINGHOUSE-PART2.md
+  §1.1, C5). FHIR and CSV are not Part 162 standard transactions.
 
 ## 2. The rules, and where each stands (as of 2026-11-17)
 
 | Rule | Citation | Status | Bearing on the system |
 |---|---|---|---|
-| General administrative requirements, definitions, preemption, enforcement | 45 CFR Part 160 | In force | Definitions (§ 160.103). Penalty tiers (§ 160.404(b)(2)(i)–(iv)), with the amounts adjusted each year at 45 CFR Part 102 (§ 160.404(a)). Penalty factors (§ 160.408). Cornell's copy shows an amendment to § 160.103 at 91 FR 14404 (2026-03-24) that this review has not examined. |
-| Transactions, code sets and identifiers | 45 CFR Part 162 | In force | Only if an X12 intake makes the operator a clearinghouse, or the operator conducts transactions for a covered entity (§1; § 162.923(c)) |
+| General administrative requirements, definitions, preemption, enforcement | 45 CFR Part 160 | In force | Definitions (§ 160.103). Penalty tiers (§ 160.404(b)(2)(i)–(iv)), with the amounts adjusted each year at 45 CFR Part 102 (§ 160.404(a)). Penalty factors (§ 160.408). The amendment to § 160.103 at 91 FR 14404 (2026-03-24) adds health care claims attachments to the definition of "transaction" (checked 2026-11-25). The 2026 Privacy Rule changes below add a telecommunications relay services exclusion to "business associate". |
+| Transactions, code sets and identifiers | 45 CFR Part 162 | In force | Only if an X12 intake, or C-CDA received as claims attachments (Subpart T, compliance by 2028-05-26), makes the operator a clearinghouse, or the operator conducts transactions for a covered entity (§1; § 162.923(c)) |
 | Security Rule | Part 164 Subparts A and C (§§ 164.302–164.318) | In force | The main body of controls (§3) |
 | Breach Notification Rule | Part 164 Subpart D (§§ 164.400–164.414) | In force | Encryption to HHS's guidance makes PHI "secured" (§5) |
 | Privacy Rule | Part 164 Subpart E (§§ 164.500–164.535) | In force | Minimum necessary, amendment, accounting, and the contract terms (§4) |
+| **Privacy Rule changes for coordinated care** | Final rule, 91 FR 74848 (2026-11-19) | **Final:** effective 2027-01-19, compliance required by 2027-07-19 (checked 2026-11-25 in the Federal Register). Amends §§ 160.103, 164.501, 164.502, 164.506, 164.512, 164.514, 164.520, 164.524 and 164.532, and adds § 164.525 | Access (§ 164.524, republished): a covered entity must act on a request within 15 calendar days (now 30), with one extension of up to 30. Finding a person's records (§4.2; HIPAA-OPERATIONS.md §4.1) must fit that. Not otherwise reviewed for the pipeline yet (§9) |
 | HIPAA (Pub. L. 104-191) and HITECH (Pub. L. 111-5) | Statutes | In force | HITECH § 13402(h)(2) is the basis of the breach guidance (§ 164.402, "unsecured protected health information") |
 | Recognized security practices | Pub. L. 116-321 (H.R. 7898, 2021-01-05), adding HITECH § 13412, 42 U.S.C. 17941 | In force | **Considering them is mandatory.** HHS "shall consider" recognized security practices that were in place for at least the previous 12 months when it decides fines, audit results and remedies. These are the NIST Cybersecurity Framework and the other approaches developed under NIST Act § 2(c)(15), the Cybersecurity Act of 2015 § 405(d) practices (HICP), and other recognized programs. Not having them can't raise a fine (§ 13412(b)(2)). § 160.408 doesn't yet list them. See §6. |
-| **Proposed Security Rule overhaul** | NPRM of 2025-01-06, cited as 90 FR 898 | **Proposed, not final.** Secondary sources from up to October 2026 report that OCR missed its May 2026 target and that the Unified Agenda lists July 2027. Not verified against the Federal Register (§9). | Not binding. §7 measures the system against it |
+| **Proposed Security Rule overhaul** | NPRM of 2025-01-06, cited as 90 FR 898 | **Proposed, not final.** A Federal Register search on 2026-11-25 finds the NPRM (90 FR 898, 2025-01-06) and no final rule. Secondary sources from up to October 2026 report that OCR missed its May 2026 target and that the Unified Agenda lists July 2027; the Unified Agenda wasn't checked. | Not binding. §7 measures the system against it |
 | Reproductive health care privacy amendments | Final rule, 89 FR 32976 (2024-04-26) | **Vacated nationwide,** according to secondary sources: *Purl v. HHS* (N.D. Tex., 2025-06-18), appeal dismissed 2025-09-10, leaving only the notice-of-privacy-practices changes made for Part 2. Not verified against a primary source. The eCFR still carries 2024 text in § 164.520 (89 FR 33064), and lists § 164.509 (attestations). | None for the pipeline. It doesn't classify records by subject, and gives no attestation |
-| Confidentiality of SUD patient records | 42 CFR Part 2, as revised in 2024; compliance date reported as 2026-02-16 (unverified, §9) | In force | Only if an intake carries records from a Part 2 program (§4.5) |
+| Confidentiality of SUD patient records | 42 CFR Part 2, as revised in 2024 (89 FR 12472, 2024-02-16); effective 2024-04-16, compliance required by 2026-02-16 (checked 2026-11-25) | In force | Only if an intake carries records from a Part 2 program (§4.5) |
 | Information blocking | 45 CFR Part 171 (21st Century Cures Act) | In force | Applies to "actors", such as providers and developers of certified health IT, not to this pipeline as such (§4.6) |
 
 **State law:**
@@ -275,6 +279,8 @@ reduced by these controls, never removed, and belongs in the customer's risk ana
 
 - **Access:** these are covered entities' duties. A business associate must make PHI available for them
   (§ 164.504(e)(2)(ii)(E)–(F)).
+  - **The time allowed shortens:** from 2027-07-19 a covered entity must act on an access request within 15
+    calendar days, with one extension of up to 30 (§ 164.524(b)(2) as republished by 91 FR 74848; §2).
   - The pipeline keeps the source document and every stage's output, linked by item and record IDs.
   - Gold is readable with a read-only grant (AWS-POC §7, `gold-reader`).
   - **Finding one individual's records:** `patients` on a record stage takes patient identifiers on standard input
@@ -661,10 +667,12 @@ These aren't HIPAA. They come with the buyers, and **none was checked against it
   - **Controls:** FISMA, with NIST SP 800-53 controls at the system's impact level. Expect the product to be
     mapped onto them (NIST SP 800-66r2's CPRT mapping helps).
   - **Cryptography:** FIPS 140-validated modules (§8.1, item 5).
-  - **Hosting:** FedRAMP applies only if we host it.
-  - **Secure development:** an attestation of secure software development practices may be required of us as the
-    software producer (the CISA form under OMB M-22-18 and M-23-16). Check its current status, which changed in
-    2025.
+  - **Hosting:** FedRAMP applies only if we host it, so it bears on a managed service offered to federal agencies.
+  - **Secure development:** OMB M-26-05 (2026-01-23) rescinded M-22-18 and M-23-16 (read 2026-11-25). Agencies are
+    no longer required to collect CISA's secure software development attestation, but may choose to use it, and
+    may require a current SBOM on request (for a cloud platform, of the runtime production environment). They
+    are pointed to NIST SP 800-218 (SSDF) and CISA's SBOM minimum elements. Expect some agencies to ask for the
+    attestation, and SBOMs, anyway.
 - **State agencies:**
   - Each state's security policy, often based on NIST SP 800-53.
   - **Medicaid and exchange systems:** CMS's security requirements (MARS-E, and its successor).
@@ -719,11 +727,20 @@ The official sources listed for this review were used where they could be reache
 | HHS portals: combined text; Security, Privacy and Breach rules; enforcement; HITECH enforcement rule | Breach guidance, cloud guidance, status of rules | **No:** hhs.gov refused every automated request (HTTP 403). The breach guidance was read instead in its Federal Register publication on govinfo (74 FR 42740, 2009-08-24, pages 42741–42743). HHS's cloud computing guidance, the NPRM's status and the Part 2 compliance date were not checked. |
 | NIST SP 800-66 Rev. 2 (February 2024) | §3, §6 | Yes. It is guidance only. In its own words it does not "supplement, replace, modify, or supersede the Security Rule itself". |
 
+**Checked on 2026-11-25:**
+- **The eCFR API** (`ecfr.gov/api/versioner/v1/full/2026-11-23/...`, current to 2026-11-23) for § 160.103, §§
+  162.923, 162.930, Part 162 Subpart T, §§ 164.105, 164.308 and 164.500, and 42 CFR Part 2. The eCFR's web pages
+  still block automated reads; its API answers.
+- **The Federal Register** (`federalregister.gov`, its API and full text) for the dates of 89 FR 12472 (Part 2),
+  91 FR 14350 (claims attachments, the 2026-03-24 amendment to § 160.103), 91 FR 74848 (the 2026 Privacy Rule
+  changes), and the Security Rule NPRM's status (no final rule).
+- **OMB M-26-05** (whitehouse.gov) for the secure development attestation (§8.4).
+
 Still to be checked against primary sources:
-- **The 2025 NPRM:** its citation (90 FR 898) and the proposals in §7.
+- **The 2025 NPRM:** the proposals in §7 (its citation, 90 FR 898, is confirmed).
 - ***Purl v. HHS* and its appeal.**
-- **The 2024 Part 2 rule:** its citation and its 2026-02-16 compliance date.
-- **The 2026-03-24 amendment to § 160.103.**
+- **The 2026 Privacy Rule changes** (91 FR 74848), beyond the access timing: what else in them bears on the
+  pipeline or the operator's procedures.
 - **HHS's cloud computing guidance** on providers that hold only ciphertext.
 
 ## 10. Requirement by requirement: what the product does, and what the customer does
@@ -850,7 +867,7 @@ the audit store wiring (§2.7 there), pipeline isolation (§2.8 there), and the 
 | D7 | **Audit event catalogue** | §8.2 item 3: every event and field, for the SIEM and the activity reviews. **Written 2026-11-25:** [security/AUDIT-EVENTS.md](security/AUDIT-EVENTS.md); `AuditEventsCatalogueTest` checks it lists every event the code emits and every control API operation. Found: the OTLP export carries no chain ID (HIPAA-OPERATIONS.md §3.2 corrected), and events before the journal opens are capped at 1,000. |
 | D8 | **Backup, restore and disaster recovery** | §8.2 item 4, from P7: what to back up, how often, how to restore, the RTO and RPO it gives. **Written 2026-11-24:** HIPAA-OPERATIONS.md §7; the RTO at size awaits the drill (§11.4, A3). |
 | D9 | **Retention and destruction** | §8.2 item 6, completed with P4: what each removal deletes and what it leaves (backups, logs). **Written 2026-11-25:** [security/RETENTION.md](security/RETENTION.md); `RetentionGuideTest` checks it names every retention setting with its default, every command a data or audit admin runs, and every claim of the erasure certificate. Found: nothing is removed unless the customer sets it (`deploy/reference/` sets no retention or bounds, and the profile requires none), a purge is asked stage by stage, a purge leaves the item's failures and ledger entry, an erasure certificate names only the KEKs in use at the erasure, no harness scenario waits for retention to delete rows, and no cryptographic erase has been rehearsed (§8 there). CONFIGURATION.md §8's retention row for convert and transform corrected. |
-| D10 | **The clearinghouse question and Part 2** | §8.2 item 7: when X12 conversion may make the operator a clearinghouse; how to keep Part 2 records apart (§2.8 there, P9). **Drafted 2026-11-25:** [security/CLEARINGHOUSE-PART2.md](security/CLEARINGHOUSE-PART2.md), not yet for customers: seven questions for counsel and the product owner (C1–C3 on the clearinghouse definition and its consequences, C4 on the vendor's managed service, P1–P3 on the 2024 Part 2 rule, which way to keep Part 2 records apart, and the redisclosure notice). Found: the X12 converter is tested only by unit tests, only C-CDA's labels are read, and the product can't tell a Part 2 record. |
+| D10 | **The clearinghouse question and Part 2** | §8.2 item 7: when X12 conversion may make the operator a clearinghouse; how to keep Part 2 records apart (§2.8 there, P9). **Drafted 2026-11-25:** [security/CLEARINGHOUSE-PART2.md](security/CLEARINGHOUSE-PART2.md), not yet for customers: eight questions for counsel and the product owner (C1–C3 on the clearinghouse definition and its consequences, C4 on the vendor's managed service, C5 on C-CDA claims attachments, P1–P3 on the 2024 Part 2 rule, which way to keep Part 2 records apart, and the redisclosure notice). Found: C-CDA claims attachments became a Part 162 standard transaction in 2026 (compliance by 2028-05-26), so the clearinghouse question reaches C-CDA conversion too (C5); the X12 converter is tested only by unit tests, only C-CDA's labels are read, and the product can't tell a Part 2 record. The rules it cites were checked against the eCFR and the Federal Register on 2026-11-25. |
 | D11 | **The vendor's security commitments** | §8.2 item 8: vulnerability scanning, how quickly fixes are released, signed images and SBOMs, how to report a vulnerability. **Drafted 2026-11-25:** [security/VENDOR-COMMITMENTS.md](security/VENDOR-COMMITMENTS.md), not yet for customers: what every release has today, and ten commitments for the product owner (V1–V10: fix times, supported releases, advisories, rescans, reporting, disclosure policy, publication and CI, the secure development attestation, FIPS). Found: the transform stage isn't in the release script, no release has been published, releases are signed on a workstation with no provenance, and no static analysis or secrets scanning runs. |
 | D12 | **Upgrades and patching** | How to take a release and its fixes without losing data (DEPLOYMENT.md, "Upgrading"), and how quickly. **Written 2026-11-25:** [security/UPGRADES.md](security/UPGRADES.md); `UpgradeGuideTest` checks it names every way the drain check lets a release in, that every stage Deployment in the kits' READMEs adds a pod before taking one away, and that no stage's code drops, renames or retypes a table or column. Found: there are no release notes, going back across a table change is untested, a whole-pipeline upgrade has not been timed at size, and the control Deployments aren't checked for version (§7 there). HIPAA-OPERATIONS.md §7.1 told operators to drain a stage before changing its version, which leaves its new pods held; corrected. |
 | D13 | **Control API deployment and use** | With P1: how to expose it, connect it to the identity provider, map the permissions, and register operators' sealing keys. **Written 2026-11-25:** [security/CONTROL-API-DEPLOYMENT.md](security/CONTROL-API-DEPLOYMENT.md); `ControlDeploymentGuideTest` checks it describes every control API setting. Found: the transform stage's control API has never been deployed (its kit's README section added), `Location` ignores the ingress's prefix, client certificates aren't checked for revocation, and no ingress has been tried (§9 there). |
