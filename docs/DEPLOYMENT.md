@@ -72,6 +72,8 @@ Every message carries its contract version, `"v": "<major>.<minor>"` (§10.2).
 
 ## Changing a stage's version
 
+For customers, a release taken step by step, going back, and patching are [security/UPGRADES.md](security/UPGRADES.md) (D12).
+
 Decided 2026-11-10 ([STAGES.md](STAGES.md) §14.4a). Each record names the version of the stage that made it, and an item is made under one version: a split or convert pod starts work only once the *drain check* lets its release in (each stage's README, "Changing the version"). A pod of a new release waits, not ready, while any item is part way under a version it wouldn't stamp; the old pods go on and finish those items. So:
 1. **Deploy with a rolling update that adds a pod first** (`maxSurge: 1`, `maxUnavailable: 0`, as the READMEs' Deployments). Under `Recreate` no old pod would be left to finish the items, and a new pod held back would wait for good.
 2. **Pause what feeds the stage, and wait until `drain-check` lists nothing part way.** Pods already running aren't checked, so with input still flowing the old pods may begin new items under the old version during the rollout, and those items would be made under both (recorded, §14.3).

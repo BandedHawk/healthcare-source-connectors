@@ -697,10 +697,12 @@ control-state
 resume
 ```
 
-Before stopping or upgrading the split, convert or transform stage, drain it: `POST /api/v1/drain` (or `drain`
-in the CLI) pauses it, then its operation record is `done` once no pod holds a claim. The CLI waits up to
-`--wait` minutes (10) and exits 1 if the stage isn't drained by then. The stage stays paused after a drain: resume
-it once the upgrade is done.
+Before stopping the split, convert or transform stage, drain it: `POST /api/v1/drain` (or `drain` in the CLI)
+pauses it, then its operation record is `done` once no pod holds a claim. The CLI waits up to `--wait` minutes (10)
+and exits 1 if the stage isn't drained by then. The stage stays paused after a drain: resume it once the work is
+done. **To change a stage's version, pause the stage before it instead,** and let this one empty its queue: a
+paused convert or transform stage leaves an item's queued records where they are, so its new pods stay held
+until it is resumed ([security/UPGRADES.md](security/UPGRADES.md) §3).
 
 KEDA keeps adding pods while a paused stage's backlog grows, and the control API can't stop it. While a stage is
 paused for longer than a few minutes, the platform administrator pauses its autoscaling too

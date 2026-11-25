@@ -17,4 +17,5 @@ and settings each statement comes from, so a reviewer can check it.
 | D8 | Backup, restore and disaster recovery | in [HIPAA-OPERATIONS.md](../HIPAA-OPERATIONS.md) §7 |
 | D13 | [Control API deployment and use](CONTROL-API-DEPLOYMENT.md) | written 2026-11-25; `ControlDeploymentGuideTest` checks it describes every control API setting |
 | D9 | [Retention and destruction](RETENTION.md) | written 2026-11-25; `RetentionGuideTest` checks it names every retention setting, data and audit admin command, and erasure certificate claim |
-| D10–D12 | | owed (HIPAA.md §11.2) |
+| D12 | [Upgrades and patching](UPGRADES.md) | written 2026-11-25; `UpgradeGuideTest` checks it names every way a release is let in, that the kits' stage Deployments add a pod first, and that releases only add to their tables |
+| D10–D11 | | owed (HIPAA.md §11.2) |
