@@ -415,6 +415,12 @@ printf '%s\n' "$(cat privacy-reader-public.pem)" 'urn:oid:2.16.840.1.113883.19.5
 - Standard input is the public key of the person who will read the result, then one identifier a line
   (`system|value`, or a value alone for any system). Identifiers never go in the arguments, which the platform logs.
 - The span is at most 31 days; run it once a month of the period asked for, or by item with `--item-id`.
+- **Allow for the deadline.** From 2027-07-19 an access request must be acted on within 15 calendar days, with
+  one extension of up to 30 (§ 164.524(b)(2), 91 FR 74848; HIPAA.md §4.7). A request covering years is many
+  runs: start them on the day it is logged. The lookup finds the records; the copy for the individual is made
+  from gold, or from the FHIR repository it feeds, in the electronic form asked for where it is readily
+  producible. Record which layers hold your designated record set (§ 164.524(f)): normally gold, or what it
+  feeds.
 - The output shows only counts. The result is sealed to the key, on lines starting `sdh-export: `: JSON lines of
   item, seq, record ID and the patients' identifiers.
 - Every record read is audited (`reader.record_read`, reader `sdh-admin`), and the run is audited with the key's

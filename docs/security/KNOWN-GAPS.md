@@ -43,7 +43,8 @@ changed. The questions are in [CLEARINGHOUSE-PART2.md](CLEARINGHOUSE-PART2.md) �
 | Where releases are published, and built in CI with provenance | V8; also §3 below | D11 §1.4 |
 | CISA's secure software development attestation, for federal buyers: no longer required since OMB M-26-05, but agencies may ask for it, or for an SBOM | V9; also §3 below, since it attests the build process | D11 §4; HIPAA.md §8.4 |
 | FIPS 140 mode: not supported, untested | V10, the product's owner; then HIPAA.md P8 | D11 §1.4; HARDENING.md |
-| The 2026 Privacy Rule changes (91 FR 74848, compliance by 2027-07-19) reviewed beyond access: access requests then answered within 15 calendar days (now 30), so the operator's lookup procedure (HIPAA-OPERATIONS.md §4.1, one run per 31 days asked for) needs checking against it | counsel, and a review of the procedures | HIPAA.md §2, §4.2, §9 |
+| The 2026 Privacy Rule changes (91 FR 74848, compliance by 2027-07-19), reviewed in HIPAA.md §4.7: whether a health plan's gold is an "electronic health record" for the right to direct a copy (§ 164.524(d)) | counsel | HIPAA.md §4.7 |
+| Business associate contracts to revise for the 2026 Privacy Rule, by renewal on or after 2027-07-19 or by 2028-01-18 at the latest, the managed service's among them; under a managed service, whether the vendor sends copies to individuals directly (§ 164.502(a)(4)(ii)) | the operator's counsel; the managed service agreements | HIPAA.md §4.7 |
 | Still unchecked against primary sources: the Security Rule NPRM's proposals beyond patching, *Purl v. HHS*, HHS's cloud computing guidance | a check, then counsel | HIPAA.md §9 |
 | Buyers' requirements beside HIPAA (NIST SP 800-53, MARS-E, IRS Publication 1075) | a buyer naming them | HIPAA.md §8.4, §11.3 |
 
@@ -107,6 +108,7 @@ Each needs only the product's owner to schedule it.
 | A purge is asked stage by stage, and leaves the item's failures and ledger entry | a pipeline-wide purge, and what it leaves decided (HIPAA.md P4) | RETENTION.md §8 |
 | An erasure certificate names only the KEKs in use at the erasure | the retired KEKs older backups need, named too | RETENTION.md §8 |
 | The product can't tell a Part 2 record | none, unless P2 or P3 asks for one | D10 §4 |
+| The patient lookup reads a span of at most 31 days, untimed at size, while access requests must be acted on in 15 calendar days from 2027-07-19 | time a multi-year lookup at size; a longer span or an index of patient identifiers if it doesn't fit | HIPAA.md §4.7; HIPAA-OPERATIONS.md §4.1 |
 | The product can't tell a C-CDA claims attachment from another C-CDA document, and has no intake for an X12 275 | depends on C5: an intake or a mark for attachments, if their pipeline must be kept apart | D10 §1.1, §4 |
 
 ## 6. Tests owed

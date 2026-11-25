@@ -141,7 +141,7 @@ insurers, and the agents of either.
 | Security Rule | Part 164 Subparts A and C (§§ 164.302–164.318) | In force | The main body of controls (§3) |
 | Breach Notification Rule | Part 164 Subpart D (§§ 164.400–164.414) | In force | Encryption to HHS's guidance makes PHI "secured" (§5) |
 | Privacy Rule | Part 164 Subpart E (§§ 164.500–164.535) | In force | Minimum necessary, amendment, accounting, and the contract terms (§4) |
-| **Privacy Rule changes for coordinated care** | Final rule, 91 FR 74848 (2026-11-19) | **Final:** effective 2027-01-19, compliance required by 2027-07-19 (checked 2026-11-25 in the Federal Register). Amends §§ 160.103, 164.501, 164.502, 164.506, 164.512, 164.514, 164.520, 164.524 and 164.532, and adds § 164.525 | Access (§ 164.524, republished): a covered entity must act on a request within 15 calendar days (now 30), with one extension of up to 30. Finding a person's records (§4.2; HIPAA-OPERATIONS.md §4.1) must fit that. Not otherwise reviewed for the pipeline yet (§9) |
+| **Privacy Rule changes for coordinated care** | Final rule, 91 FR 74848 (2026-11-19) | **Final:** effective 2027-01-19, compliance required by 2027-07-19 (checked 2026-11-25 in the Federal Register). Amends §§ 160.103, 164.501, 164.502, 164.506, 164.512, 164.514, 164.520, 164.524 and 164.532, and adds § 164.525 | Access (§ 164.524, republished): a covered entity must act on a request within 15 calendar days (now 30), with one extension of up to 30. Finding a person's records (§4.2; HIPAA-OPERATIONS.md §4.1) must fit that. The rest is reviewed in §4.7 |
 | HIPAA (Pub. L. 104-191) and HITECH (Pub. L. 111-5) | Statutes | In force | HITECH § 13402(h)(2) is the basis of the breach guidance (§ 164.402, "unsecured protected health information") |
 | Recognized security practices | Pub. L. 116-321 (H.R. 7898, 2021-01-05), adding HITECH § 13412, 42 U.S.C. 17941 | In force | **Considering them is mandatory.** HHS "shall consider" recognized security practices that were in place for at least the previous 12 months when it decides fines, audit results and remedies. These are the NIST Cybersecurity Framework and the other approaches developed under NIST Act § 2(c)(15), the Cybersecurity Act of 2015 § 405(d) practices (HICP), and other recognized programs. Not having them can't raise a fine (§ 13412(b)(2)). § 160.408 doesn't yet list them. See §6. |
 | **Proposed Security Rule overhaul** | NPRM of 2025-01-06, cited as 90 FR 898 | **Proposed, not final.** A Federal Register search on 2026-11-25 finds the NPRM (90 FR 898, 2025-01-06) and no final rule. Secondary sources from up to October 2026 report that OCR missed its May 2026 target and that the Unified Agenda lists July 2027; the Unified Agenda wasn't checked. | Not binding. §7 measures the system against it |
@@ -280,7 +280,8 @@ reduced by these controls, never removed, and belongs in the customer's risk ana
 - **Access:** these are covered entities' duties. A business associate must make PHI available for them
   (§ 164.504(e)(2)(ii)(E)–(F)).
   - **The time allowed shortens:** from 2027-07-19 a covered entity must act on an access request within 15
-    calendar days, with one extension of up to 30 (§ 164.524(b)(2) as republished by 91 FR 74848; §2).
+    calendar days, with one extension of up to 30 (§ 164.524(b)(2) as republished by 91 FR 74848). The rest of
+    that rule's changes to access are in §4.7.
   - The pipeline keeps the source document and every stage's output, linked by item and record IDs.
   - Gold is readable with a read-only grant (AWS-POC §7, `gold-reader`).
   - **Finding one individual's records:** `patients` on a record stage takes patient identifiers on standard input
@@ -343,6 +344,26 @@ The pipeline never discards data, and its failures are visible and recoverable. 
 store and reported to the producer (STAGES §15.1). That supports an actor's duty not to interfere with access,
 exchange or use of electronic health information. Latency from landing to gold is a measured target
 ([PERFORMANCE.md](PERFORMANCE.md)).
+
+### 4.7 The 2026 Privacy Rule changes (91 FR 74848)
+
+A final rule of 2026-11-19, effective 2027-01-19, with compliance required by **2027-07-19**. Its regulatory text
+was read in full on 2026-11-25 (federalregister.gov). It changes §§ 160.103, 164.501, 164.502, 164.506, 164.512,
+164.514, 164.520, 164.524 (republished) and 164.532, and adds § 164.525. What bears on the pipeline:
+
+| Change | What it means here |
+|---|---|
+| **Access within 15 calendar days** (§ 164.524(b)(2), (d)(5)(ii)), with one extension of up to 30; a shorter time another law sets counts as practicable | The operator's lookup (HIPAA-OPERATIONS.md §4.1) must fit inside it. `patients` reads every FHIR record in a span of at most 31 days (DESIGN.md §11.4), so a request covering years is one run a month asked for. It has not been timed at size |
+| **A copy in the electronic form and format asked for,** if readily producible; a form another law requires (a payer's FHIR patient access API, say) is deemed readily producible (§ 164.524(c)(2)(ii)–(iii)) | Gold is FHIR R4 to US Core 6.1, so a copy is producible from it. The product finds a person's records but makes no copy for them: the operator's readers do, from gold or the FHIR repository it feeds |
+| **PHI held in more than one designated record set, or place, is produced once** (§ 164.524(c)(1)); the covered entity documents its designated record sets and the electronic health records subject to the right to direct (§ 164.524(f)) | The pipeline holds each document at several layers (DATA-FLOWS.md). The operator should record which hold the designated record set, normally gold or what it feeds, and that bronze and silver are copies on the way to it |
+| **Sending a copy to the individual's personal health application, or by email;** no fee for internet-based access (§ 164.524(c)(3), (c)(4)(ii)(B)) | The operator's readers, not the pipeline |
+| **The right to direct an electronic copy of PHI in an electronic health record to a person the individual names** (§ 164.524(d)); "electronic health record" is defined as one consulted by clinicians (§ 164.501) | Whether a health plan's gold is such a record is for counsel. Either way the copy is made by the operator's readers |
+| **A business associate's required disclosures** (§ 164.502(a)(4)(ii)): to the individual or their designee, when the business associate contract says so, for § 164.524(c)(2)(ii) and (d)(1) | A business associate running the pipeline, the vendor under a managed service among them, may be required by its contract to send copies to individuals directly. That needs a reader of its own and the audit `reader.record_read` gives |
+| **Business associate contracts made before 2026-11-19** stay compliant until renewed or modified on or after 2027-07-19, or until 2028-01-18 (§ 164.532(e)) | The operator's contracts, and the managed service's, need revising by then |
+| **Care coordination and case management** are named in health care operations (§ 164.501), and may be disclosed to social services and community organisations (§ 164.506(c)(6)) | A reader may read for them; its purpose of use (`sdh.purpose`) can say so (HL7's `COC`, say) |
+| **No unreasonable verification** of an individual exercising a right (§ 164.514(h)(2)(v)) | The operator's procedure, not the pipeline |
+| **The notice of privacy practices** (§ 164.520) and a **fee schedule** (§ 164.525) | The covered entity's, not the pipeline's |
+| § 164.512(d)(3), (k), (m); the telecommunications relay services exclusion (§ 160.103) | None |
 
 ## 5. Breach Notification Rule (Subpart D)
 
@@ -733,14 +754,12 @@ The official sources listed for this review were used where they could be reache
   still block automated reads; its API answers.
 - **The Federal Register** (`federalregister.gov`, its API and full text) for the dates of 89 FR 12472 (Part 2),
   91 FR 14350 (claims attachments, the 2026-03-24 amendment to § 160.103), 91 FR 74848 (the 2026 Privacy Rule
-  changes), and the Security Rule NPRM's status (no final rule).
+  changes, whose regulatory text was read in full: §4.7), and the Security Rule NPRM's status (no final rule).
 - **OMB M-26-05** (whitehouse.gov) for the secure development attestation (§8.4).
 
 Still to be checked against primary sources:
 - **The 2025 NPRM:** the proposals in §7 (its citation, 90 FR 898, is confirmed).
 - ***Purl v. HHS* and its appeal.**
-- **The 2026 Privacy Rule changes** (91 FR 74848), beyond the access timing: what else in them bears on the
-  pipeline or the operator's procedures.
 - **HHS's cloud computing guidance** on providers that hold only ciphertext.
 
 ## 10. Requirement by requirement: what the product does, and what the customer does
