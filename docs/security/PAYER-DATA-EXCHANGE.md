@@ -35,6 +35,10 @@ element kept as received (DESIGN.md §6.4). **No mapping turns any X12 transacti
 product knows an 837 from an 835. Pharmacy claims, which come as NCPDP, aren't read at all. A pipeline carries
 one type of content (DESIGN.md §5.3), so a claim (837) and its payment (835) arrive in different pipelines.
 
+**X12 to FHIR is future work, beyond this project** (decided 2026-11-25). Every stream of it, technical and not,
+is handed over in [PAYER-X12-FUTURE-WORK.md](../PAYER-X12-FUTURE-WORK.md), with a first idea for the join of a
+claim and its payment: two pipelines, joined after gold.
+
 ## 2. The insurer's standing
 
 ### 2.1 Converting its own data
@@ -165,7 +169,7 @@ customer's FHIR server and authorisation server expose it.
 
 ## 4. What the product must meet
 
-### 4.1 Product work
+### 4.1 Product work (a future project)
 
 > **For review (Q5): the X12 scope.** The product's owner to decide which transactions, in what order, and
 > whether claims-system extracts (CSV, fixed width) come before X12.

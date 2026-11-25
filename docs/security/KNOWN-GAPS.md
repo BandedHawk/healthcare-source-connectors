@@ -89,9 +89,10 @@ product, so each needs a counterpart, or a change, for a managed service.
 | A pipeline per customer | each customer's pipeline isolated as HIPAA-OPERATIONS.md §2.8 sets out, with keys and readers of its own | D10 §3 |
 | Part 2 records | which way of keeping them apart the service offers (P2), and who applies Part 2's notice and limits | D10 §2 |
 
-## 5. Product gaps that can be built now
+## 5. Product gaps
 
-Each needs only the product's owner to schedule it.
+Each needs only the product's owner to schedule it. Rows marked "a future project" are the payer claims
+work, beyond this project ([PAYER-X12-FUTURE-WORK.md](../PAYER-X12-FUTURE-WORK.md)).
 
 | Gap | Change owed | Found in |
 |---|---|---|
@@ -112,9 +113,9 @@ Each needs only the product's owner to schedule it.
 | A purge is asked stage by stage, and leaves the item's failures and ledger entry | a pipeline-wide purge, and what it leaves decided (HIPAA.md P4) | RETENTION.md §8 |
 | An erasure certificate names only the KEKs in use at the erasure | the retired KEKs older backups need, named too | RETENTION.md §8 |
 | The product can't tell a Part 2 record | none, unless P2 or P3 asks for one | D10 §4 |
-| No X12 transaction is mapped to FHIR (837, 835, 834, 278 to CARIN Blue Button, CARIN Digital Insurance Card, PDex), and NCPDP isn't read | mappings as WSTL sets, in the order Q5 decides, each validated against its IG | PAYER-DATA-EXCHANGE.md §4.1 |
-| A claim and its payment (837 and 835) can't be joined: one type of content per pipeline | a join keyed on the claim, revising the EOB as each part arrives, with a visible held state | PAYER-DATA-EXCHANGE.md §4.1 |
-| Part 2 programs' claims can't be told apart | labels or routing from a customer's provider list, if Q4 says so | PAYER-DATA-EXCHANGE.md §2.5 |
+| No X12 transaction is mapped to FHIR (837, 835, 834, 278 to CARIN Blue Button, CARIN Digital Insurance Card, PDex), and NCPDP isn't read | a future project: mappings as WSTL sets, in the order Q5 decides, each validated against its IG | PAYER-X12-FUTURE-WORK.md §3.5 |
+| A claim and its payment (837 and 835) can't be joined: one type of content per pipeline | a future project: two pipelines joined after gold, revising the EOB as each part arrives, with a visible held state | PAYER-X12-FUTURE-WORK.md §4 |
+| Part 2 programs' claims can't be told apart | a future project: labels or routing from a customer's provider list, if Q4 says so | PAYER-X12-FUTURE-WORK.md §3.6 |
 | The patient lookup reads a span of at most 31 days, untimed at size, while access requests must be acted on in 15 calendar days from 2027-07-19 | time a multi-year lookup at size; a longer span or an index of patient identifiers if it doesn't fit | HIPAA.md §4.7; HIPAA-OPERATIONS.md §4.1 |
 | The product can't tell a C-CDA claims attachment from another C-CDA document, and has no intake for an X12 275 | depends on C5: an intake or a mark for attachments, if their pipeline must be kept apart | D10 §1.1, §4 |
 
