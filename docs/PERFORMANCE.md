@@ -1503,6 +1503,9 @@ What it showed, beyond §2's predictions:
     needs `KAFKA_OPTS` set with a SASL listener; PgBouncer's rollout needs no extra pod (the state node has no
     room for a third); and a crash-looping `kafka-0` must be deleted for a fixed StatefulSet to replace it.
 
+  Runs P and Q are the first entry in PERFORMANCE-MILESTONES.md, with their conditions and configuration in
+  full; later runs that show important progress go there too.
+
   **How to read the shared services:** the stages' per-pod rates,
   CPU a document and $ a million documents carry over to a production deployment; Postgres, PgBouncer and Kafka
   are one node's worth, not a production cluster's, so where they are the limit the result says what one such
