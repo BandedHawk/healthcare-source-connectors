@@ -89,7 +89,7 @@ key. The risk analysis should weigh each.
 
 ## 4. Keys, and who can open what
 
-The keys are D3's subject; here, only what each can open.
+The keys are [KEYS.md](KEYS.md)'s subject (D3); here, only what each can open.
 
 | Key | Opens | Held |
 |---|---|---|

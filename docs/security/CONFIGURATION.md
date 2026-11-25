@@ -64,7 +64,7 @@ names every check.
 
 ## 4. Keys
 
-What each key is and who holds it is D3. The settings:
+What each key is and who holds it is [KEYS.md](KEYS.md) (D3). The settings:
 
 | Setting | Safe value | What it does |
 |---|---|---|

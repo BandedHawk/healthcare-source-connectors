@@ -482,8 +482,9 @@ to get a source document back when the pipeline can't process it.
 Rotate when a KEK may be compromised, when a key custodian leaves, or on the covered entity's schedule. A KMS's
 own automatic rotation (a new version of the same key) needs none of this: old versions still decrypt. These
 steps move a stage to a different key. Each stage is a scope of its own (`<stage>/<connector ID>`, or
-`landing/<connector ID>`), with its own KEK: the records KEK for the split, convert and transform stages, the
-landed items KEK for a landing node.
+`landing/<connector ID>`), with its own KEK: the records KEK for the split and convert stages, the FHIR KEK (its sink's) for the transform
+stage, the landed items KEK for a landing node. Every key, who holds it and its key policy are in
+[security/KEYS.md](security/KEYS.md); replacing a signing key or an inbox key pair is its §5.
 
 1. **The key custodians** create the new KEK and grant it, to wrap and unwrap, to the stage's own identity, and,
    to unwrap, to everything that reads the stage's tables: the split stage reads `landed_items`, the convert stage
@@ -772,6 +773,9 @@ Then:
      step 5 deletes it with the buckets.
   4. The key custodians schedule deletion of the KEKs and signing keys each certificate names (two people).
      Everything the pipeline stored, backups included, becomes unreadable: a cryptographic erase.
+     The platform administrator destroys the stages' inbox key pairs and their passphrases, and the data
+     consumer owner the gold readers' key pair, which open what is left on the broker's topics
+     ([security/KEYS.md](security/KEYS.md) §7).
   5. The platform administrator deletes the buckets, the Postgres schemas and the topics, and records the
      provider's media destruction terms (NIST SP 800-88).
 - **Operator key pairs** are revoked when a person leaves: the security official removes the fingerprint from the
