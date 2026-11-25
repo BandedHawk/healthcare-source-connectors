@@ -842,7 +842,7 @@ the audit store wiring (§2.7 there), pipeline isolation (§2.8 there), and the 
 | D10 | **The clearinghouse question and Part 2** | §8.2 item 7: when X12 conversion may make the operator a clearinghouse; how to keep Part 2 records apart (§2.8 there, P9). |
 | D11 | **The vendor's security commitments** | §8.2 item 8: vulnerability scanning, how quickly fixes are released, signed images and SBOMs, how to report a vulnerability. |
 | D12 | **Upgrades and patching** | How to take a release and its fixes without losing data (DEPLOYMENT.md, "Upgrading"), and how quickly. |
-| D13 | **Control API deployment and use** | With P1: how to expose it, connect it to the identity provider, map the permissions, and register operators' sealing keys. **Written 2026-11-25:** [security/CONTROL-API-DEPLOYMENT.md](security/CONTROL-API-DEPLOYMENT.md); `ControlDeploymentGuideTest` checks it describes every control API setting. Found: the transform kit has no control API section, `Location` ignores the ingress's prefix, client certificates aren't checked for revocation, and no ingress has been tried (§9 there). |
+| D13 | **Control API deployment and use** | With P1: how to expose it, connect it to the identity provider, map the permissions, and register operators' sealing keys. **Written 2026-11-25:** [security/CONTROL-API-DEPLOYMENT.md](security/CONTROL-API-DEPLOYMENT.md); `ControlDeploymentGuideTest` checks it describes every control API setting. Found: the transform stage's control API has never been deployed (its kit's README section added), `Location` ignores the ingress's prefix, client certificates aren't checked for revocation, and no ingress has been tried (§9 there). |
 
 ### 11.4 The infrastructure tests, run together (planned 2026-11-24)
 

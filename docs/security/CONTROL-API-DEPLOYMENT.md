@@ -22,8 +22,8 @@ stage's own image, in control mode (`args: [control]`), beside the stage's worke
 | Settings | the workers' settings, then a ConfigMap of its own, `sdh-control-<stage>`, mounted at `/control` and read after them |
 | Ports | 8443, TLS, for the API; 8081, plain, serving only `/livez` and `/readyz` for Kubernetes' probes |
 | Replicas | 2, for availability. It keeps no state of its own: any replica answers any call, and a long operation is run by whichever holds its lease |
-| Memory | 768 MiB a pod, half of it heap |
-| Manifests | the Deployment, Service and NetworkPolicy in each kit's README, "Control API" |
+| Memory | 768 MiB a pod, half of it heap; 1 GiB for the transform stage, which loads its WSTL set |
+| Manifests | the Deployment, Service and NetworkPolicy in each kit's README, "Control API"; the transform stage's also mounts the workers' WSTL set |
 
 **Deploy all four, the transform stage's included.** Each stage answers only for its own data:
 - A failure is exported, retried or corrected on the stage it failed at.
@@ -32,11 +32,8 @@ stage's own image, in control mode (`args: [control]`), beside the stage's worke
   purged at every stage it passed through (CONTROL-API-DESIGN.md §15.8).
 
 Under the profile the CLI refuses the operations that need four eyes (`cli-four-eyes`). Without a stage's control
-API, its data can then be purged or erased only by waiving that check. The transform kit's README doesn't yet have a
-"Control API" section (§9), so follow the convert stage's, with the transform kit's names:
-- the workers' Secret `transform-stage-env`;
-- the keys Secret `transform-stage-keys`;
-- the ConfigMaps `transform-stage-config` and `transform-stage-wstl`.
+API, its data can then be purged or erased only by waiving that check. The transform stage's control API is the
+least tried of the four (§9).
 
 **Spread the replicas.** Put the two pods on different nodes and zones (`topologySpreadConstraints`), and give
 each Deployment a PodDisruptionBudget of `minAvailable: 1`. The control API is needed most when the workers are in
@@ -406,12 +403,11 @@ issuer (CONTROL-API-DESIGN.md §14). They don't check the customer's ingress or 
 
 ## 9. Findings
 
-- **The transform kit has no "Control API" section,** and the harness has never deployed the transform stage's
-  control API (CONTROL-API-DESIGN.md §15.11, §15.12). The stage has control mode (`TransformStageApplication`).
-  Without its control API:
-  - its failures can't be exported or corrected through the API;
-  - nor can the patient lookup run on gold;
-  - under the profile, its data can be purged or erased only with `cli-four-eyes` waived.
+- **The transform stage's control API has never been deployed.** The stage has control mode
+  (`TransformStageApplication`), but the harness runs the other three stages only (CONTROL-API-DESIGN.md §15.11,
+  §15.12). Its kit had no "Control API" section; one was added with this document, from the convert stage's, with
+  the WSTL set mounted, since its `version` operations load it, and 1 GiB for that. Until it is tried, check it on
+  a test pipeline first.
 - **`Location` and `resultAt` ignore the ingress's prefix.** They are paths on the pod (`/api/v1/operations/{id}`),
   so a client behind an ingress that strips `/pipelines/<p>/stages/<s>` must add it back itself. A setting for the
   public base path, or honouring `X-Forwarded-Prefix`, would fix it.
@@ -438,4 +434,4 @@ issuer (CONTROL-API-DESIGN.md §14). They don't check the customer's ingress or 
 | Sealing keys | `OperatorKeys` (`MAX_LIFETIME`, `MIN_RSA_BITS`), `OperatorKeyCommands`; CONTROL-API-DESIGN.md §7 |
 | Compliance checks | `connector-runtime` `ComplianceCheck` (`CONTROL_TLS`, `CONTROL_TOKEN_LIFETIME`, `CLI_FOUR_EYES`) |
 | Purge and erasure per stage | CONTROL-API-DESIGN.md §15.8 |
-| Transform control mode | `healthcare-data-transformer` `TransformStageApplication` |
+| Transform control mode, and its WSTL set | `healthcare-data-transformer` `TransformStageApplication`, `admin/TransformAdmin`; its kit's README, "Control API" |
