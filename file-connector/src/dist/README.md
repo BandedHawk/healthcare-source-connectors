@@ -135,6 +135,29 @@ Run it under a service manager (for example systemd) that restarts it when it ex
 status 70 on conditions it can't safely continue from, and resumes where it stopped. At startup it waits for a key
 service that is down or not serving, logging `crypto.kms_waiting`; a key or permission refused stops it at once.
 
+## Securing a host
+
+Without Kubernetes, the network policies and the pod's restrictions that the kits rely on aren't there: the host
+must give them.
+
+**The ports.** A worker listens only on its probe port, `sdh.stage.ready-port` (8081, plain TCP, no data); its
+control API, run as a process of its own, on `sdh.control.port` (8443, TLS) and `sdh.control.probe-port` (8081).
+Each binds every interface. Let the probe ports in from the host itself and the control port from its operators'
+path only, and close the rest (docs/security/NETWORK.md §2).
+
+**Memory must not reach a disk.** While it works, the process holds documents, records and data keys in plaintext.
+The JVM options in `config/jvm.options` turn off every dump the JVM could write, but not the operating system's
+own paging. A general-purpose Linux host usually has swap on, and may write memory out by zswap or hibernation:
+plaintext PHI on a disk, outside the product's encryption, beyond a cryptographic erase, and possibly a breach
+to notify if the disk is lost. On the host:
+- swap off (`swapoff -a`, and the swap lines removed from `/etc/fstab`), and zswap off;
+- no hibernation or suspend to disk; on a VM, no snapshots that include memory and no suspend;
+- no kernel crash dumps (`kdump`), or dumps only to an encrypted, access-controlled volume;
+- the disks encrypted, and the host for the pipeline alone.
+
+Check with `swapon --show` (empty) and `cat /sys/module/zswap/parameters/enabled` (`N`). Why each matters:
+docs/security/HARDENING.md §3, "Memory must not reach a disk".
+
 ## Build a container image
 
 From this directory:

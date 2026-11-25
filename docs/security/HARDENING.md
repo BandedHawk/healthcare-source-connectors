@@ -134,11 +134,38 @@ Neither has been tried with the product's images (§6).
 | Control | Why | How |
 |---|---|---|
 | **A CIS benchmark** for the nodes and the cluster | Kernel and runtime flaws let a container read across processes | The CIS Kubernetes or EKS benchmark, checked with `kube-bench` or the provider's scanner; a hardened node image (Bottlerocket, or the provider's CIS image); patched by routine node rotation |
-| **No swap**, or encrypted swap | Memory paged out to a disk | Kubernetes nodes run without swap by default: keep it so |
+| **No swap**, or encrypted swap (below, "Memory must not reach a disk") | Plaintext PHI paged out of a stage's memory onto a disk | Kubernetes nodes run without swap by default (the kubelet's `failSwapOn`): keep it so, and never turn on node swap (`swapBehavior: LimitedSwap`) for the pipeline's nodes |
 | **No kernel crash dumps** (`kdump` off), or dumps only to an encrypted, access-controlled volume | The whole node's memory written out on a kernel crash | The node image's settings |
 | **Encrypted volumes:** root disks, and the volumes of Postgres and Kafka | Anything that reaches a disk all the same | EBS encryption with a KMS key (the account's default, or a launch template that sets it); the provider's equivalent elsewhere |
 | **No interactive access** | Root on a node reads every process on it | No SSH keys; Systems Manager sessions for named staff only, logged |
 | **Dedicated nodes** for the pipeline | Another tenant's compromised pod on the same kernel | Taints and node selectors, or a node group of its own |
+
+**Memory must not reach a disk.** While a stage works on an item, its memory holds the item in plaintext: the
+document, its records, the FHIR it makes, and the data keys that open the rest. The product encrypts everything it
+writes and writes no dump, but it can't stop the operating system or the hypervisor from writing its memory out.
+If they do:
+- **The PHI is on a disk in the clear,** outside the product's encryption, its keys and its audit: whoever can
+  read that disk, or an image or snapshot of it, can read it.
+- **It outlives the process,** often a reboot, and goes wherever the disk's backups and snapshots go.
+- **A cryptographic erase doesn't reach it** (RETENTION.md §4): destroying the KEKs leaves it readable.
+- **It may not count as secured PHI.** HHS's breach guidance treats PHI as secured when it is encrypted to its
+  specifications; plaintext pages on a lost or improperly disposed disk may be a breach to notify (HIPAA.md §5).
+
+So, on every node or host that runs a stage, and on Vault's:
+- **No swap.** Not on a disk, a file or a volume. Encrypted swap, with a key made at each boot, is the fallback
+  where swap can't be avoided; record the exception in the risk analysis. zram (compressed swap held in memory)
+  stays in memory, but zswap writes to a swap device behind it: turn off both, or the device.
+- **No hibernation or suspend to disk** (EC2 hibernation writes memory to the root volume; a laptop or desktop's
+  hibernate does the same).
+- **No memory snapshots of the VMs:** a hypervisor's suspend, a snapshot that includes memory (VMware's `.vmem`
+  files), or a live migration through a file. Snapshot disks only, with the VM's memory left out, or none.
+- **No kernel crash dumps,** or dumps only to an encrypted, access-controlled volume (the row above).
+- **Vault:** it holds the KEKs. With integrated storage HashiCorp has it run with `disable_mlock = true`, and then
+  says to turn swap off on its hosts; without integrated storage, leave mlock on. Either way, no swap there.
+
+Check each with the node image or host: `swapon --show` empty, `/sys/module/zswap/parameters/enabled` `N`,
+hibernation off. On Kubernetes, the kubelet refuses to start on a node with swap unless `failSwapOn` is false:
+leave it true. The stages don't check this themselves yet (KNOWN-GAPS.md §5).
 
 Confidential computing nodes (AMD SEV-SNP, Intel TDX) are an option where the threat model includes the cloud
 provider's staff; HIPAA-OPERATIONS.md §2.9 discusses them. They have not been tried.
@@ -210,6 +237,8 @@ waiting period, and every use in CloudTrail, to the SIEM.
       containers in pipeline namespaces.
 - [ ] The stages' service accounts mount no token and have no Role.
 - [ ] The nodes pass the CIS benchmark, run without swap or kernel crash dumps, have encrypted disks and no SSH.
+- [ ] No node or host that runs a stage or Vault can swap, hibernate, or have its memory snapshotted (§3, "Memory
+      must not reach a disk"); the kubelet's `failSwapOn` is true.
 - [ ] Postgres, Kafka and the buckets are encrypted at rest. Postgres and Kafka take TLS only, and log
       connections, role changes and ACL changes to the SIEM.
 - [ ] Every bucket keeps versions, refuses plaintext and public access, and has CloudTrail data events on.
@@ -229,6 +258,8 @@ waiting period, and every use in CloudTrail, to the SIEM.
 - **No node has been checked against a CIS benchmark,** and no hardened node image (Bottlerocket) tried. The PoC's
   nodes run Amazon Linux 2023.
 - **Neither an external secret store nor Object Lock has been tried** with the product.
+- **The stages don't check that their memory can't reach a disk** (§3): swap, zswap and hibernation are the
+  platform's to turn off, and nothing refuses a host where they are on (KNOWN-GAPS.md §5).
 
 ## Sources
 

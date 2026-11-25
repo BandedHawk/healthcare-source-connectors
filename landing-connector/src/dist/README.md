@@ -236,6 +236,30 @@ on conditions it can't safely continue from, and resumes where it stopped. A ser
 (storage, the broker, the key service) doesn't stop it: pushes are answered unavailable, with `Retry-After`, until
 the service is back. At startup it waits for a key service that is down, logging `crypto.kms_waiting`.
 
+## Securing a host
+
+Without Kubernetes, the network policies and the pod's restrictions that the kits rely on aren't there: the host
+must give them.
+
+**The ports.** A push intake listens on `sdh.landing.http.port` (8443, TLS), on the active node only, and is
+probed there; a polled intake listens on none. The control API, run as a process of its own, listens on
+`sdh.control.port` (8443, TLS) and `sdh.control.probe-port` (8081, plain, no data). Each binds every interface.
+Let the push port in from its load balancer only, the control port from its operators' path only and the probe
+port from the host itself, and close the rest (docs/security/NETWORK.md §2).
+
+**Memory must not reach a disk.** While it works, the process holds documents, records and data keys in plaintext.
+The JVM options in `config/jvm.options` turn off every dump the JVM could write, but not the operating system's
+own paging. A general-purpose Linux host usually has swap on, and may write memory out by zswap or hibernation:
+plaintext PHI on a disk, outside the product's encryption, beyond a cryptographic erase, and possibly a breach
+to notify if the disk is lost. On the host:
+- swap off (`swapoff -a`, and the swap lines removed from `/etc/fstab`), and zswap off;
+- no hibernation or suspend to disk; on a VM, no snapshots that include memory and no suspend;
+- no kernel crash dumps (`kdump`), or dumps only to an encrypted, access-controlled volume;
+- the disks encrypted, and the host for the pipeline alone.
+
+Check with `swapon --show` (empty) and `cat /sys/module/zswap/parameters/enabled` (`N`). Why each matters:
+docs/security/HARDENING.md §3, "Memory must not reach a disk".
+
 ## Build a container image
 
 From this directory:

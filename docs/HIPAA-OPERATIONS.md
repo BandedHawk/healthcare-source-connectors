@@ -297,7 +297,7 @@ on the host, the process and the people who can reach them (§ 164.312(a)(1), §
 
 | Action | What it closes |
 |---|---|
-| **No swap on the nodes,** or encrypted swap (Kubernetes nodes run without swap by default; keep it so) | Memory paged out to a disk |
+| **No swap on the nodes,** or encrypted swap; no hibernation, no memory snapshots of the VMs (Kubernetes nodes run without swap by default; keep it so, and never turn on node swap). Why, and how to check: [security/HARDENING.md](security/HARDENING.md) §3, "Memory must not reach a disk" | Plaintext PHI paged out of memory onto a disk, outside the product's encryption and beyond the reach of a cryptographic erase |
 | **No kernel crash dumps** on the nodes (`kdump` off, or dumps to an encrypted, access-controlled volume), and no node-level memory capture tools | The whole node's memory written to disk on a kernel crash |
 | **Encrypted node volumes** (EBS encryption, or the provider's equivalent) | Anything that reaches a node's disk all the same |
 | **Restricted Pod Security Standard** enforced on the pipeline namespaces | A privileged or `hostPID` pod on the same node reading another process's memory |

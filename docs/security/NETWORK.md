@@ -66,6 +66,31 @@ it (CONTROL-API-DEPLOYMENT.md §1). No stage serves metrics to be scraped: telem
 
 The landing node of a polled intake has no listener at all: its health is the process (its kit's README).
 
+**Each listens on every interface** of its pod or host: there is no setting to bind one address. In a pod that is
+the pod's own address, and the policies of §4 decide who reaches it. **On a host** (a kit's `bin/`), nothing does
+that for you: a host firewall must (each kit's README, "Securing a host"). The probe ports are plain TCP or HTTP,
+for the host's own health checks only; the push and control ports for their load balancer or ingress only.
+
+### 2.1 The platform services' listeners
+
+The services the pipeline uses are the customer's, and so are their ports. These are the usual defaults, for the
+firewall and the policies: let in only what §3 says reaches each, and close every other listener to the network.
+
+| Service | Port (default) | Who needs it | Close or restrict |
+|---|---|---|---|
+| Postgres | 5432 | the stages and their control pods, or PgBouncer only | `hostssl` lines only (HARDENING.md §4.1); `listen_addresses` the pipeline network's, never `*` on a public interface |
+| PgBouncer | 6432 (5432 on the PoC) | the stages and their control pods | its admin console (`admin_users`) to named staff only |
+| Kafka, clients | the TLS listener (9093 or 9094 commonly) | the stages and their control pods | no `PLAINTEXT` listener on the network (HIPAA-OPERATIONS.md §2.6) |
+| Kafka, between brokers and the controllers (KRaft) | the inter-broker and controller listeners (9093, 9091 and others, as configured) | the brokers and controllers only | TLS and principals of their own; never reachable from the pipeline's namespaces |
+| Vault | 8200 (API), 8201 (cluster) | the stages, for Transit; 8201 Vault's own nodes only | TLS on 8200 (`tls_disable` never true in production); the UI off or to named staff |
+| SeaweedFS | S3 gateway 8333; master 9333, volume 8080, filer 8888, and each one's gRPC port (the HTTP port plus 10000) | the S3 gateway: the stages; the rest: SeaweedFS's own servers only | only the S3 gateway, with TLS, reachable from the stages; the master, volume and filer ports (which serve objects without the S3 gateway's identities) never from outside the store's own servers |
+| The OpenTelemetry collector | 4318 (OTLP/HTTP), 4317 (OTLP/gRPC) | the stages and their control pods | the pipeline's namespaces only; 4317 closed if unused |
+| Kubernetes | the API server (443 or 6443), the kubelet (10250) | the platform's administrators; the API server to the kubelet | never public; `exec`, `port-forward` and `debug` by named staff only (HIPAA-OPERATIONS.md §2) |
+
+Check against the service's own documentation for its version: defaults change, and a chart or operator may set
+others. The sandbox's Vault (`deploy/sandbox/infra/vault.yaml`) listens on plain HTTP inside the sandbox; it is not
+an example for production.
+
 The kits' policies don't admit the kubelet's probes: on EKS's VPC CNI and on Calico (the sandbox) traffic from a
 pod's own node is let through regardless. On a CNI that applies policies to it, let the nodes' addresses in on 8081.
 
@@ -198,6 +223,10 @@ or a producer. It records:
 - [ ] The key and bucket policies refuse the stages' identities from outside the pipeline's network.
 - [ ] The control ingress answers from the operator's path only; the push load balancer only on the push port.
 - [ ] The broker has no plaintext listener on the network (HIPAA-OPERATIONS.md §2.6, "Securing the broker").
+- [ ] Of the platform services (§2.1), only the listeners in §3 are reachable from the pipeline; SeaweedFS's
+      master, volume and filer ports, Kafka's controller listeners and Vault's cluster port aren't.
+- [ ] On a host, the firewall lets in only the push or control port, from its load balancer, and the probe port
+      from the host itself.
 - [ ] The network map is current, and its review dated.
 
 ## 9. Findings
@@ -210,6 +239,8 @@ or a producer. It records:
   PHI and needs none of it until it does.
 - **The kubelet's probes rely on the CNI** letting a pod's own node through (§2): true of the two CNIs tried, EKS's VPC
   CNI and Calico, not checked on others.
+- **The listeners bind every interface** (§2), with no setting to choose one: a gap on a host with more than one
+  network, where only the firewall keeps them in (KNOWN-GAPS.md §5).
 - **No egress proxy has been tried.** The stages' clients (the AWS SDK, the JDBC and Kafka clients, the token key set
   fetch) were never run through one. Where egress must go through a proxy, test it first, with synthetic data.
 - **The push intake has no rate limit or connection limit of its own** beyond `max-item-bytes` and `max-wait`
