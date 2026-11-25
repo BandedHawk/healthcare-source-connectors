@@ -18,6 +18,12 @@ changes it names, but has not been run yet (HIPAA.md §11.4, A1). Since DESIGN.m
 performance pipelines follow them too (the hipaa profile, Kafka over SASL_SSL, Postgres through PgBouncer with
 `verify-full`), which the same test checks.
 
+> **Warning: losing a key loses the data, for good.** Everything the pipeline stores, every version and every
+> backup, is encrypted under KEKs in your KMS, and neither the product nor the vendor keeps a copy. A KEK
+> deleted, locked out by its key policy, or gone with its KMS (a closed cloud account, a lost Vault) leaves
+> everything under it unreadable. Before you delete or disable a key, or move or close a store, a database, a
+> KMS or a cloud account, read [docs/HIPAA-OPERATIONS.md](../../docs/HIPAA-OPERATIONS.md) §7.3.
+
 ## Files
 
 - `landing-application.yml`, `splitter-application.yml`, `convert-application.yml`, `transform-application.yml`:

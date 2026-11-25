@@ -11,6 +11,12 @@ profile on. The profile refuses keys kept beside the stage instead of in a KMS (
 stage signing key below is in a KMS unless that check is waived. The other KMSs the product supports (Google Cloud
 KMS, Azure Key Vault, Vault Transit; DESIGN.md §7.4) take the same keys with their own names for the operations.
 
+> **Warning: losing a key loses the data, for good.** Everything the pipeline stores, every version and every
+> backup, is encrypted under KEKs in your KMS, and neither the product nor the vendor keeps a copy. A KEK
+> deleted, locked out by its key policy, or gone with its KMS (a closed cloud account, a lost Vault) leaves
+> everything under it unreadable. Before you delete or disable a key, or move or close a store, a database, a
+> KMS or a cloud account, read [HIPAA-OPERATIONS.md](../HIPAA-OPERATIONS.md) §7.3.
+
 ## 1. The hierarchy
 
 ```

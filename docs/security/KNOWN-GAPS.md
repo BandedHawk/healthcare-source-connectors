@@ -112,6 +112,8 @@ work, beyond this project ([PAYER-X12-FUTURE-WORK.md](../PAYER-X12-FUTURE-WORK.m
 | `deploy/reference/` sets no retention, and the profile requires none | retention and bounds in the reference settings, and a compliance check | RETENTION.md §8 |
 | A purge is asked stage by stage, and leaves the item's failures and ledger entry | a pipeline-wide purge, and what it leaves decided (HIPAA.md P4) | RETENTION.md §8 |
 | An erasure certificate names only the KEKs in use at the erasure | the retired KEKs older backups need, named too | RETENTION.md §8 |
+| A re-key can't move a stage's data to another KMS provider: one `wrap-provider` a stage | a second, unwrap-only provider during a re-key, so a pipeline can leave a KMS | HIPAA-OPERATIONS.md §7.3 |
+| A pipeline's tables can't be moved to another bucket, store or cloud: Iceberg's catalog and metadata name each file by its full path; a region's replica bucket has the same problem | a move command (rewriting the paths, as Iceberg's table-path rewrite does) or a bucket-name mapping in the stages' file IO, tried with a region failover | HIPAA-OPERATIONS.md §7.3, §7 "Other losses" |
 | The product can't tell a Part 2 record | none, unless P2 or P3 asks for one | D10 §4 |
 | No X12 transaction is mapped to FHIR (837, 835, 834, 278 to CARIN Blue Button, CARIN Digital Insurance Card, PDex), and NCPDP isn't read | a future project: mappings as WSTL sets, in the order Q5 decides, each validated against its IG | PAYER-X12-FUTURE-WORK.md §3.5 |
 | A claim and its payment (837 and 835) can't be joined: one type of content per pipeline | a future project: two pipelines joined after gold, revising the EOB as each part arrives, with a visible held state | PAYER-X12-FUTURE-WORK.md §4 |
@@ -134,6 +136,7 @@ work, beyond this project ([PAYER-X12-FUTURE-WORK.md](../PAYER-X12-FUTURE-WORK.m
 | A cryptographic erase rehearsed: a KEK destroyed, then a restore from an older backup tried | the sandbox | RETENTION.md §8 |
 | A self-hosted site restore: SeaweedFS copied by `filer.backup` or `filer.sync` (do versions, delete markers and locks survive?), Postgres from a base backup and WAL archive, Vault from a raft snapshot with its unseal keys, then the restore steps; timed for an RTO | the sandbox, with a second SeaweedFS and Vault | HIPAA-OPERATIONS.md §7, "Self-hosted stores" |
 | The restore drill at size, and the other steps of the AWS session | the AWS session | HIPAA.md §11.4 (A1, A3, A4) |
+| A re-key to a KEK in another account or region of the same KMS | the sandbox (Vault) or the AWS session | HIPAA-OPERATIONS.md §7.3 |
 | The transports still untested | as each environment is prepared | HIPAA.md P11 |
 
 ## 7. The AWS PoC

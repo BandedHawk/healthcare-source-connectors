@@ -5,6 +5,12 @@ product. This document is the customer's side: the roles, the procedures, and th
 each procedure uses. **It is not legal advice;** the customer's privacy and compliance counsel adapt it to their
 own policies.
 
+> **Warning: losing a key loses the data, for good.** Everything the pipeline stores, every version and every
+> backup, is encrypted under KEKs in your KMS, and neither the product nor the vendor keeps a copy. A KEK
+> deleted, locked out by its key policy, or gone with its KMS (a closed cloud account, a lost Vault) leaves
+> everything under it unreadable. Before you delete or disable a key, or move or close a store, a database, a
+> KMS or a cloud account, read §7.3, "Keeping the keys, and moving a pipeline".
+
 "The operator" is the customer, or the agent running the product for it (HIPAA.md §1). Commands are the admin
 commands every stage ships (DESIGN.md §11.4), run as
 `java @/app/jvm.options @/app/container.options @/app/admin.args <command> --operator <name> ...` through
@@ -674,7 +680,7 @@ pipeline's catching up; it has not yet been measured at size.
 | Loss | What to do |
 |---|---|
 | Objects deleted from the store, the database whole | Steps 1 and 4 to 9 above, without restoring the database: the repair brings back each deleted file the catalog needs from its versions. An overwritten object is restored to its last good version with the store's tools. |
-| A region | The database from its cross-region copy, the store's replica and multi-region keys, then the steps above in the other region. Items landed within the replication's lag whose intake was in the lost region may be lost. |
+| A region | The database from its cross-region copy, the store's replica and multi-region keys, then the steps above in the other region. The replica must be reached under the bucket names the catalog holds, since it names each file by its full path (§7.3): plan this before you need it. Items landed within the replication's lag whose intake was in the lost region may be lost. |
 | Kafka | Make the topics again and start the stages: the reconcilers rebuild what was in flight. |
 | A KEK destroyed | Nothing under it can be read again. Keys are never deleted while a backup needs them (§8). |
 
@@ -834,6 +840,68 @@ Then:
   segments not yet archived are restore points lost.
 - **Review** the capacity with the weekly checks (§3), and record each review.
 
+### 7.3 Keeping the keys, and moving a pipeline (§ 164.308(a)(7), § 164.312(a)(2)(iv))
+
+> **Warning: losing a key loses the data, for good.** Everything the pipeline stores is encrypted under KEKs held
+> in your KMS: bronze, silver and gold, every version and every backup. The product keeps no copy of any KEK, and
+> neither does the vendor. A KEK that is deleted, that a key policy locks everyone out of, or that goes with its
+> KMS (a closed cloud account, a lost Vault) leaves everything under it unreadable, and no one can recover it.
+> Before you delete or disable a key, or move or close a store, a database, a KMS or a cloud account, read this
+> section.
+
+**The keys that can't be made again.** Each is needed for as long as anything encrypted, signed or checked with it
+is kept, backups included:
+
+| Key | Lose it and | Keep it until |
+|---|---|---|
+| Each stage's KEK, and every KEK a re-key retired | everything stored under it can't be read: tables, versions, backups | the last backup under it has expired, and nothing is left under it (`GET /keys` on every stage) |
+| The ID keys (stored wrapped in a table property, under the KEK) | lost with the KEK; they can never be replaced (KEYS.md §2), so record IDs and deduplication break even for data you still hold | as the KEK |
+| Vault's storage and its unseal or recovery keys, where Vault Transit holds the KEKs | every KEK in it | as the KEKs (§7, "Self-hosted stores") |
+| An auto-unseal key, where Vault unseals with a cloud KMS | Vault itself, and every KEK in it | as Vault |
+| Each stage's signing key's **public** half, after the key is replaced | `audit-verify` of the journal it sealed, and checks of the erasure certificates it signed | as the audit archive: six years (§3.3) |
+| The operators' private keys | the results sealed to them, which were meant to be short-lived | the person leaves (§8) |
+
+**How a key gets lost without anyone deleting it:**
+- **A key policy that locks everyone out.** On AWS KMS, a key policy that grants no one `kms:PutKeyPolicy` can't be
+  changed again without AWS Support, not even by the account's root user. Never bypass KMS's lockout safety
+  check; the PoC's deployer is denied it (deploy/aws/iam/README.md).
+- **A closed account, project or subscription.** Closing an AWS account, shutting down a Google Cloud project or
+  cancelling an Azure subscription ends its keys after the provider's grace period, whatever their own deletion
+  settings say. Re-key everything, backups included, to keys in another account first (below).
+- **A KMS left unbacked-up:** Vault, or a hardware security module, whose storage is lost (§7, "Self-hosted
+  stores").
+- **A scheduled deletion nobody watched.** AWS keeps a key for 7 to 30 days after `ScheduleKeyDeletion`, Google
+  Cloud a destroyed version for its `destroy_scheduled_duration`, Azure a deleted key for its soft-delete period;
+  then it is gone. Alert on these calls (§7, "Protecting the backups") and on a key's state changing.
+
+**Before disabling or deleting any KEK, the custodians check, in the ticket:**
+1. `GET /keys` on every stage that used it shows nothing under it, and the last re-key from it ended over an hour
+   ago (§6.1).
+2. Every backup made while anything was under it has expired: the database's recovery window, the store's
+   noncurrent versions, any off-site or snapshot copy, Vault snapshots included.
+3. Nothing the covered entity must keep or get back is still under it: the export at the end of a contract (§8)
+   is complete, and the receiving party has confirmed it can read what it got.
+4. Disable it first, and keep it disabled, not deleted, until 1 to 3 have been true for a full recovery window.
+   A disabled key can be enabled again; a deleted one can't.
+
+The one deliberate exception is the cryptographic erase at the end of a contract (§8), whose whole point is that
+nothing can be read again. Do it last, after the export.
+
+**Moving a pipeline.** The pipeline's three parts move together, paused and drained (§7.1), and its keys move
+last, after everything is re-keyed:
+
+| Moving | How | Watch for |
+|---|---|---|
+| **To a new KEK in the same KMS provider** (another key, account or region) | Rotate and re-key, as §6.1, with the new key granted to the stage and its readers; then the checklist above for the old one | A KEK in another account or region has not been tried with the re-key; try it on a throwaway pipeline first |
+| **To another KMS provider** (AWS KMS to Vault, say) | **Not supported:** a stage wraps with one provider (`sdh.crypto.wrap-provider`), so a re-key can't cross providers | Keep the old provider, and its keys, for as long as anything is under them |
+| **The database** (another server, a managed service, a major version) | Pause and drain every stage; a full dump and restore, or the provider's own migration; point the stages at it; then `restore-check` on each (§7, step 4) | The database and the store must be from the same moment: move it with every stage paused, and keep the old one until the check passes |
+| **The object store** (another bucket, store or cloud) | **Not supported yet:** Iceberg's catalog and metadata name each file by its full path, bucket included, so tables copied to another bucket aren't found at the new name | Keep the same endpoint name and bucket names at the new store, where it allows that (a self-hosted store behind the same DNS name); otherwise ask the vendor |
+| **To another cloud account** | The three rows above, in order: database, store, then the keys re-keyed into the new account | Close the old account only after the checklist above passes for every key in it |
+
+A copy of a pipeline's data elsewhere (a store replica, a database copy, a backup taken off site) is still under
+the same KEKs. It is only as recoverable as those keys are where you would restore it: grant them, or replicate
+them (multi-Region keys, Vault snapshots), to every place you might restore to.
+
 ## 8. Retention, disposal and end of contract (§ 164.310(d), § 164.504(e)(2)(ii)(J))
 
 What each removal deletes, what it leaves (versions, backups, topics, delivered copies) and how destroying the
@@ -869,7 +937,8 @@ keys ends the rest is [security/RETENTION.md](security/RETENTION.md) (D9); the s
      It leaves the stage's control log (`_control/` beside its tables: operation IDs, item IDs, tickets,
      principals and times, no PHI), so that a restore of the database to before the erasure erases again (§7);
      step 5 deletes it with the buckets.
-  4. The key custodians schedule deletion of the KEKs and signing keys each certificate names (two people).
+  4. The key custodians schedule deletion of the KEKs and signing keys each certificate names (two people),
+     only once the covered entity has confirmed it can read the export of step 1 (§7.3).
      Everything the pipeline stored, backups included, becomes unreadable: a cryptographic erase.
      The platform administrator destroys the stages' inbox key pairs and their passphrases, and the data
      consumer owner the gold readers' key pair, which open what is left on the broker's topics

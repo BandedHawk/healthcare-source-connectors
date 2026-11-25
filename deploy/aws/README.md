@@ -2,6 +2,12 @@
 
 The design is in docs/AWS-POC.md. This README covers starting and stopping the PoC.
 
+> **Warning: losing a key loses the data, for good.** Everything the pipeline stores, every version and every
+> backup, is encrypted under KEKs in your KMS, and neither the product nor the vendor keeps a copy. A KEK
+> deleted, locked out by its key policy, or gone with its KMS (a closed cloud account, a lost Vault) leaves
+> everything under it unreadable. Before you delete or disable a key, or move or close a store, a database, a
+> KMS or a cloud account, read [docs/HIPAA-OPERATIONS.md](../../docs/HIPAA-OPERATIONS.md) §7.3.
+
 ## Tools (once)
 
 `poc.sh` needs `terraform` 1.10 or later, `kubectl`, `aws` (already installed), `python3`, `curl`, `envsubst` and

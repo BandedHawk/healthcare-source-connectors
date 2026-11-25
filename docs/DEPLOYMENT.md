@@ -4,6 +4,12 @@ How the pipeline is meant to be deployed, why, and what else was considered. Wri
 
 A pipeline is one intake, its landing node and its splitter, and carries one type of content (§5.3). The **landing node** (`landing-connector`) takes items in through the intake (a watched directory, HTTP push, a remote source or a queue) and stores each exactly as received, encrypted, in `landed_items` (§5.3). It then sends a signed, encrypted `item.landed` message to its splitter. The **splitter** (`file-connector`) takes that message into its inbox, reads the item from landing, and splits, converts, stores and announces its records to downstream consumers (§5.3.12, §6, §10).
 
+> **Warning: losing a key loses the data, for good.** Everything the pipeline stores, every version and every
+> backup, is encrypted under KEKs in your KMS, and neither the product nor the vendor keeps a copy. A KEK
+> deleted, locked out by its key policy, or gone with its KMS (a closed cloud account, a lost Vault) leaves
+> everything under it unreadable. Before you delete or disable a key, or move or close a store, a database, a
+> KMS or a cloud account, read [HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md) §7.3.
+
 ## Recommendation
 
 **Run the landing node and the splitter as separate images and deployments, with the queue between them on an external broker.** Use the broker the customer already runs for the splitter's output, with a queue or topic of its own.
