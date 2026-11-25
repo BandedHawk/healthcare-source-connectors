@@ -497,7 +497,7 @@ All versions were checked against Maven Central on 2026-10-28.
 | Testcontainers | 2.0.5 | `-Pit` only, run by Failsafe 3.6.1 (§15) |
 | OpenTelemetry | 1.62.0 (Boot-managed) | `connector-core` uses the API only; `file-connector` gets the SDK from `spring-boot-starter-opentelemetry` and exports over OTLP/HTTP with its own filtered exporters (§12) |
 | Maven | 3.9.16 via Maven Wrapper | The local install is 3.8.7 |
-| Spark | **Not used** | |
+| Spark | **Not used** | Considered and not chosen: [ALTERNATIVES-CONSIDERED.md](ALTERNATIVES-CONSIDERED.md) §1 |
 
 Where a component has no LTS line (Iceberg, Parquet, Nimbus), we use the latest stable release, with versions managed in the parent POM.
 
