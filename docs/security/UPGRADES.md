@@ -6,8 +6,11 @@ whole across it, how to take one, how to go back, and how to take patches to the
 HIPAA.md §11.2's document D12, for the customer's patch management (§ 164.308(a)(1)(ii)(B), (a)(5)(ii)(B)) and
 for keeping data whole while the system changes (§ 164.312(c)(1)). The design behind it is DEPLOYMENT.md,
 "Upgrading" and "Changing a stage's version", and STAGES.md §14.4a; each kit's README has a section "Changing the
-version". What the vendor commits to (how soon fixes are released, how to report a vulnerability) is
-[VENDOR-COMMITMENTS.md](VENDOR-COMMITMENTS.md) (D11, a draft).
+version". It also covers testing a new WSTL set (§3.4) and changing a pipeline's configuration (§3.5), such as
+moving an intake from a directory to SFTP, which HIPAA treats as an operational change: evaluate again
+(§ 164.308(a)(8)) and update the policies and procedures (§ 164.316(b)(2)(iii)). What the vendor commits to (how
+soon fixes are released, how to report a vulnerability) is [VENDOR-COMMITMENTS.md](VENDOR-COMMITMENTS.md) (D11, a
+draft).
 
 It describes a pipeline deployed from `deploy/reference/` and the kits' READMEs, with the `hipaa` compliance profile
 on. **A release never loses or rewrites data on its own.** Every record is stamped with the version of the stage
@@ -119,6 +122,81 @@ under one version: record why in the ticket.
 started straight after an outage is held until the old version's items are finished, and no old pod is left to
 finish them.
 
+### 3.4 Testing a new WSTL set
+
+A WSTL set decides what goes into gold: a mistake in one maps records wrongly, or leaves a field out, without an
+error. The stage checks only that the set loads (a set that won't load stops the stage's start, before it takes any
+message, so no record fails) and puts the set's digest in its version. Whether the output is right is the customer's
+test, before production:
+
+1. **Review the change as code.** Keep the set in version control, have each change reviewed by someone other than
+   its author, and raise the `version` in its `wstl-set.json`. Record the set's name and version in the change
+   ticket.
+2. **Run it on a pipeline that isn't production,** with synthetic or de-identified documents only, never real PHI.
+   Land a corpus under the current set, deploy the new one (§3.2), and reprocess what the current set made:
+   `reprocess --made-by <current version>` at the transform stage, with `--dry-run` first (STAGES.md §15.8.4).
+   `reprocess --status --run <id>` gives each record's outcome, `same`, `different` or `failed`. Every `different`
+   should be one the change meant, and every `failed` explained: each is an open failure with its code.
+3. **Check that it is deterministic:** reprocess again what the new set made (`--made-by <new version>`). Any
+   `different` means the set doesn't give the same output for the same input (a clock, a random number or a UUID
+   in it), which the stage can't otherwise detect. Don't deploy such a set (STAGES.md §17.10.2).
+4. **Validate the bundles** against the profile the set says it makes (`makes`; US Core 6.1 for C-CDA), with the
+   validator your gold readers rely on.
+5. **Deploy it in production** as §3.2, and check that the release `stage.version_changed` names, and `version`
+   lists, carries the set's name, version and digest as tested. Records already in gold stay as the old set made
+   them; to map them again under the new one, reprocess them (`--made-by`), which keeps the old ones, superseded
+   (§4, "Its data").
+
+**Who may change it.** The set is a ConfigMap mounted read only, not part of the signed image (STAGES.md §17.10.2),
+so whoever can edit that ConfigMap can change how PHI is mapped. Give write access to it only to those who may
+deploy the stage (Kubernetes RBAC), and compare each new release's digest with the one tested: a version change that
+no ticket accounts for is a security incident to look into (HIPAA-OPERATIONS.md §6). The set isn't signed (§7).
+
+### 3.5 Changing a pipeline's configuration
+
+A change to a pipeline's settings, Secrets or manifests that isn't a new release still changes how PHI is
+received, held or sent. What the product notices of one:
+
+| What changes | What the product records | What it doesn't |
+|---|---|---|
+| A split, convert or transform setting that changes the output (one in the version's digest) | a new version: held by the drain check, audited `stage.version_changed` | |
+| A WSTL set | a new version, by the set's digest (§3.4) | |
+| A compliance waiver | `compliance.waived` at every start, with its reason | |
+| Any other stage setting: a broker, a database, a key, a limit | `connector.started`, as at any start | what changed: `GET /settings` (the control API's `settings`) shows only what is set now |
+| The landing node's intake: its type (a directory to SFTP, say), host, bucket, path, access mode or credentials | `connector.started`, naming only the intake and its lease epoch: the landing node stamps no version | that anything changed (§7) |
+
+So the record of a configuration change is the customer's: the change ticket, the manifests in version control,
+and the Kubernetes API server's audit log of who changed a ConfigMap, Secret or Deployment. Keep the output of
+`GET /settings` (secrets removed) from before and after the change with the ticket.
+
+**What HIPAA asks.** The Security Rule has no standard named change management, but a change of this kind is an
+"operational change" under two of them: the evaluation is to be done again in response to it (§ 164.308(a)(8)),
+and the documentation reviewed and updated (§ 164.316(b)(2)(iii)). The risk analysis and risk management are
+ongoing (§ 164.308(a)(1)(ii)(A)–(B)), and the change must keep the audit controls (§ 164.312(b)), integrity
+(§ 164.312(c)(1)) and transmission security (§ 164.312(e)(1)). The proposed Security Rule (90 FR 898, not final;
+HIPAA.md §2) would also require a technology asset inventory and a network map, reviewed at least every 12 months
+and whenever the environment or operations change.
+
+**Changing an intake** (a directory to SFTP, a bucket to HTTP push, a new sender's server):
+1. **Assess it first,** with the security official: the new transport's risks in the risk analysis; the sender's
+   agreement (a BAA where the sender's server, or a third party's, now holds the PHI on its way); the network map
+   (NETWORK.md §7) and asset inventory; and who now holds which credentials.
+2. **Set it up to CONFIGURATION.md's requirements** for the transport: an SFTP server's host key pinned in
+   `known-hosts`; SMB 3 with encryption; TLS and the sender's authentication for a push. The compliance profile
+   refuses the plaintext endpoints it knows of, and checks nothing else about the new source.
+3. **Empty the old source first.** Let the landing node land everything on it (with `access: read-write`, nothing
+   is left there), then pause it (§3, step 1).
+4. **Prefer a new intake name** (`sdh.landing.intake`) for a new kind of source. The name keys the landing lease,
+   the checkpoint and the ledger, and an item's source reference is the intake name with the item's path relative
+   to the source. Under a new name the ledger starts empty, so a file found on both sources is landed again, as a
+   duplicate (`item.duplicate_content`; nothing is dropped). Under the same name, whether a file at the same
+   relative path is taken for one already landed depends on the size and version each source reports, which is
+   untested (§7).
+5. **Deploy and resume,** then check: `connector.started` from the new pod, no `intake.unreachable`, and an item
+   followed through to gold. Record in the ticket the settings before and after, when, and who approved it.
+6. **Retire the old source:** revoke its credentials, remove its firewall rules and network policies, and dispose
+   of anything left on it under your disposal policy (HIPAA-OPERATIONS.md §8).
+
 ## 4. Going back
 
 **The release current before is always let in** (`previous`), whatever is part way: `kubectl rollout undo`, stage
@@ -197,6 +275,14 @@ carries the fix. How quickly the vendor releases a fix is D11's.
 - **The documents said to drain a stage before changing its version.** HIPAA-OPERATIONS.md §7.1 told operators to
   drain the stage itself before an upgrade, which at the convert and transform stages leaves its new pods held
   while it is paused (§3). Corrected there.
+- **The landing node doesn't notice an intake change.** It stamps no version, and `connector.started` names only
+  the intake and its lease epoch, so moving an intake from a directory to SFTP leaves no trace in the audit trail
+  (§3.5). Nor is any other setting outside the version's digest recorded. The product needs, at each start, a
+  keyed digest of those settings and of the intake's identity (type, host or bucket, path, access mode, how it
+  authenticates; never the values), and `intake.changed`, for review, when it differs from the last start.
+- **Changing an intake's type under the same name is untested:** what the ledger takes for already landed when the
+  same relative paths appear on a new source (§3.5, step 4).
+- **A WSTL set isn't signed,** and no command prints a set's digest to compare with the one tested (§3.4).
 - **The vendor's commitments are unanswered** (D11, drafted as [VENDOR-COMMITMENTS.md](VENDOR-COMMITMENTS.md)):
   how soon a fix for a High or Critical vulnerability is released, how long a release is supported, and how to
   report a vulnerability. The release registry and where releases are published are not set up yet (DESIGN.md
@@ -206,10 +292,14 @@ carries the fix. How quickly the vendor releases a fix is D11's.
 
 - **Code:** `DrainGate` and `StageReleases` (the drain check), `ContractVersion` and `PayloadCodec` (the contract),
   `SchemaChanges`, `FailureStore.ddls` and `IngestTables` (the tables), `StageProperties`
-  (`version-check-interval`).
-- **Documents:** DEPLOYMENT.md, "Upgrading" and "Changing a stage's version"; STAGES.md §14.2, §14.4a; DESIGN.md
+  (`version-check-interval`), `LandingRuntime` (`connector.started`) and `SourceRef` (an item's source reference).
+- **Documents:** DEPLOYMENT.md, "Upgrading" and "Changing a stage's version"; STAGES.md §14.2, §14.4a, §15.8.4,
+  §17.10.2; CONFIGURATION.md; NETWORK.md §7; DESIGN.md
   §10.2, §14.4, §14.5; each kit's README, "Changing the version" and "Verify what you received"; SANDBOX.md, the
-  drain check; PERFORMANCE.md §8; HIPAA-OPERATIONS.md §7, §7.1.
+  drain check; PERFORMANCE.md §8; HIPAA-OPERATIONS.md §6, §7, §7.1, §8.
+- **The rule:** 45 CFR § 164.308(a)(1), (a)(8), § 164.312(b), (c)(1), (e)(1), § 164.316(b)(2)(iii)
+  (https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164/subpart-C); the proposed rule, 90 FR 898
+  (https://www.federalregister.gov/documents/2025/01/06/2024-30983).
 - **The test:** `UpgradeGuideTest` (connector-stage) checks that this document names every way a release is let in,
   the contract version written, and the drain check's setting with its default; that every stage Deployment in the
   kits' READMEs adds a pod first and takes none away; and that no stage's code drops, renames or retypes a table or

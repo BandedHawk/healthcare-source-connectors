@@ -1008,8 +1008,10 @@ A support engineer of the vendor is never given a role on the API, nor a sealing
 BAAs or MOUs with every provider (cloud, KMS, broker, SIEM); the risk analysis and risk management; a named security
 official; workforce policies, training and sanctions; MFA and access reviews; the reviews in §3; the incident
 response plan and breach notices; contingency plans and their tests; the retention periods; responses to
-individuals' requests; the penetration test and its fixes (§11); deciding whether the clearinghouse and Part 2 rules apply (HIPAA.md §1, §4.5); and keeping
-this documentation for 6 years from when it was last in effect (§ 164.316(b)(2)(i)).
+individuals' requests; the penetration test and its fixes (§11); evaluating again after each operational change,
+such as a new intake or WSTL set, with its change ticket (security/UPGRADES.md §3.4, §3.5); deciding whether the
+clearinghouse and Part 2 rules apply (HIPAA.md §1, §4.5); and keeping this documentation for 6 years from when
+it was last in effect (§ 164.316(b)(2)(i)).
 
 ## 11. Penetration testing: the customer's, and what to secure first
 

@@ -119,6 +119,8 @@ work, beyond this project ([PAYER-X12-FUTURE-WORK.md](../PAYER-X12-FUTURE-WORK.m
 | Registry retention deletes rows a batch at a time, competing with the load | registry tables partitioned by time, a partition dropped at a time, if a soak shows the deletes cost | DEPLOYMENT.md, "Postgres under load" |
 | A stage doesn't check that its memory can't be swapped to disk | a compliance check under the profile (`memory-swap`): refuse to start where the container may swap (cgroup v2 `memory.swap.max` not 0) or the host has swap on (`/proc/swaps`), with a waiver for encrypted swap | HARDENING.md §3 |
 | The listeners (push, control, probes) bind every interface, with no setting to choose an address | a bind-address setting for each, for hosts with more than one network | NETWORK.md §2, §9 |
+| A configuration change outside the version isn't recorded, and a landing intake's change (a directory to SFTP, say) not at all | at each start, audit a keyed digest of the settings outside the version and of the intake's identity (type, host or bucket, path, access mode, how it authenticates; never the values); `intake.changed`, for review, when it differs from the last start; perhaps refuse a type change under the same name until an operator accepts it | UPGRADES.md §3.5, §7 |
+| A WSTL set isn't signed, and nothing prints its digest | a signed set, checked at start under the profile, and an `sdh-admin` command that prints a set's digest | UPGRADES.md §3.4, §7 |
 | The product can't tell a Part 2 record | none, unless P2 or P3 asks for one | D10 §4 |
 | No X12 transaction is mapped to FHIR (837, 835, 834, 278 to CARIN Blue Button, CARIN Digital Insurance Card, PDex), and NCPDP isn't read | a future project: mappings as WSTL sets, in the order Q5 decides, each validated against its IG | PAYER-X12-FUTURE-WORK.md §3.5 |
 | A claim and its payment (837 and 835) can't be joined: one type of content per pipeline | a future project: two pipelines joined after gold, revising the EOB as each part arrives, with a visible held state | PAYER-X12-FUTURE-WORK.md §4 |
@@ -132,6 +134,7 @@ work, beyond this project ([PAYER-X12-FUTURE-WORK.md](../PAYER-X12-FUTURE-WORK.m
 |---|---|---|
 | Formats beyond C-CDA and CSV at the pipeline level: X12, EDIFACT, delimited, XML, FHIR, Parquet; X12 at a payer's size, with history since 2016 | locally or the sandbox; size on AWS | D10 §4; DEPLOYMENT.md, "Formats" |
 | The release before run against tables a newer release made | locally | UPGRADES.md §7 |
+| An intake's type changed under the same name (a directory to SFTP): what the ledger takes for already landed | locally | UPGRADES.md §3.5, §7 |
 | A whole-pipeline upgrade timed at size | the AWS session (HIPAA.md §11.4), with its cost approved | UPGRADES.md §7 |
 | The transform stage's control API deployed, and through an ingress | the sandbox | CONTROL-API-DEPLOYMENT.md §9 |
 | A control Deployment of each kind on one stage, tokens and certificates | the sandbox | CONTROL-API-DEPLOYMENT.md §9 |
