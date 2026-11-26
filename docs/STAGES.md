@@ -2771,7 +2771,10 @@ needed the user are decided in §17.10.10; the rest is proposed.
 
 - **What a set is:** a directory or a `.tar.gz` with `main.wstl` at its root and everything it imports, as
   mapping's US Core package is (74 KB). Named by `sdh.transform.wstl` (a path); in Kubernetes a ConfigMap mounted
-  read only, so a new set is a new ConfigMap and a rollout, never a new image.
+  read only, so a new set is a new ConfigMap and a rollout, never a new image. Revised 2026-11-26 (DESIGN.md (fn)):
+  the ConfigMap is immutable and named for the set (`<stage>-wstl-<first 12 hex of its digest>`), and the stage is
+  pinned to the set's digest (`sdh.transform.wstl-digest`, printed by `set-digest`), so a set is never changed
+  under running pods; a new one is a change of the Deployment.
 - **Loaded once, at start:** the engine's initialised builder (`Engine.Builder(...).initialize(meta)`, with
   `Checks.setMode(meta, FAIL_FAST)`), as quickrun does; each record gets its own engine from it
   (`initialized.build()`), closed after. A set that won't load stops the stage's start (`stage.not_started`),
@@ -2861,6 +2864,7 @@ Five new codes in `ErrorCode` (`connector-core`): `TRANSFORM_UNSUPPORTED`, `TRAN
 sdh:
   transform:
     wstl: /etc/sdh/wstl           # the set: a directory or a .tar.gz (§17.10.2)
+    # wstl-digest: <64 hex>       # the set's digest; another set doesn't start (added 2026-11-26, (fn))
     max-bytes: 64MB               # larger records are kept as they came, TRANSFORM_TOO_LARGE
     memory:                       # the heap the mappings running at once may use; unset for a share of the heap
     memory-factor: 20             # heap per byte of input, measured (§17.10.8)

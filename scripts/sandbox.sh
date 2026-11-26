@@ -657,6 +657,7 @@ build_images() {
   (cd "$TRANSFORMER" && ./mvnw -q package -DskipTests)
   cp "$TRANSFORMER/transform-stage/target/test-sets/us-core.tar.gz" "$STATE/wstl-us-core.tar.gz.tmp"
   mv "$STATE/wstl-us-core.tar.gz.tmp" "$STATE/wstl-us-core.tar.gz"
+  wstl_digest "$STATE/wstl-us-core.tar.gz" >/dev/null
   # module=image: the split stage kept its module's name, file-connector. The transform stage is a folder of
   # another project, which build-image.sh takes as it is.
   local apps=(landing-connector=landing-connector file-connector=split-stage convert-stage=convert-stage) app
@@ -708,6 +709,25 @@ deploy_pipelines() {
   kc -n sdh-producers rollout status deploy/producer --timeout=300s >/dev/null
 }
 
+# wstl_digest <set.tar.gz>: the set's digest, as the transform stage computes it (its set-digest command, from the
+# transformer's jar), kept beside the set as <set>.digest until the set changes. The set's ConfigMap is named by
+# its first 12 hex digits, immutable, and the stage pinned to it (sdh.transform.wstl-digest), so a new set is a new
+# ConfigMap and a change of the Deployment, never an edit under running pods.
+wstl_digest() {
+  local set="$1" jar
+  if [[ ! -s "$set.digest" || "$set.digest" -ot "$set" ]]; then
+    jar="$(ls "$TRANSFORMER"/transform-stage/target/transform-stage-*.jar 2>/dev/null \
+      | grep -v -e '-sources' -e '-javadoc' | head -n 1 || true)"
+    [[ -n "$jar" ]] || { echo "No transformer jar in $TRANSFORMER/transform-stage/target:" \
+      "run scripts/sandbox.sh images" >&2; exit 1; }
+    java -jar "$jar" set-digest "$set" 2>/dev/null | awk '{print $1}' > "$set.digest.tmp" || true
+    grep -qE '^[0-9a-f]{64}$' "$set.digest.tmp" \
+      || { rm -f "$set.digest.tmp"; echo "set-digest could not read the WSTL set $set" >&2; exit 1; }
+    mv "$set.digest.tmp" "$set.digest"
+  fi
+  cat "$set.digest"
+}
+
 # need_images: the images' digests, from the last `images`, and the WSTL set.
 need_images() {
   [[ -s "$STATE/images.env" ]] || { echo "No images yet: run scripts/sandbox.sh images" >&2; exit 1; }
@@ -747,7 +767,8 @@ reference_policies() {
 
 # deploy_pipeline <pipeline>
 deploy_pipeline() {
-  local p="$1" n work
+  local p="$1" n work wstl_sha
+  wstl_sha="$(wstl_digest "$STATE/wstl-us-core.tar.gz")"
   n="$(ns "$p")"
   work="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -846,6 +867,7 @@ deploy_pipeline() {
   readme_yaml "$TRANSFORMER/transform-stage/src/dist/README.md" \
     | sed -e "s#<registry>/transform-stage:<version>#$transform_stage#" \
           -e "s/transform-stage-\(env\|keys\|config\|wstl\)/transform-$p-\1/g" \
+          -e "s/<set id>/${wstl_sha:0:12}/g" -e "s/<set digest>/$wstl_sha/g" \
           -e "s/name: transform-stage }/name: transform-$p }/" -e "s/app: transform-stage }/app: transform-$p }/g" \
     > "$work/transform/transform.yaml"
   cp "$DEPLOY/pipeline/landing-patch.yaml" "$DEPLOY/pipeline/landing-service.yaml" "$work/landing/"
@@ -896,6 +918,8 @@ deploy_pipeline() {
       || ! wait_for 300 logged sdh-fhir "deploy/transform-$p" "Started TransformStageApplication"; then
     kc -n sdh-fhir get pods -o wide; kc -n sdh-fhir logs "deploy/transform-$p" --tail=60; exit 1
   fi
+  # The set's ConfigMap from before sets had their own (edited in place): nothing refers to it now.
+  kc -n sdh-fhir delete configmap "transform-$p-wstl" --ignore-not-found >/dev/null
   envsubst '$PIPELINE $K8S_NS $KAFKA_BROKERS' < "$DEPLOY/pipeline/scaling.yaml" | kc apply -f - >/dev/null
   envsubst '$PIPELINE $KAFKA_BROKERS' < "$DEPLOY/fhir/scaling.yaml" | kc apply -f - >/dev/null
   local scaled
@@ -929,9 +953,12 @@ transform_settings() {
     --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "fhir-recipient-passphrase-$p")"
   kc -n sdh-fhir create configmap "$t-config" --from-file=application.yml="$2" \
     --dry-run=client -o yaml | kc apply -f - >/dev/null
-  # The set as binary data: a ConfigMap holds no folders, so the .tar.gz as mapping packs it.
-  kc -n sdh-fhir create configmap "$t-wstl" --from-file=set.tar.gz="$STATE/wstl-us-core.tar.gz" \
-    --dry-run=client -o yaml | kc apply -f - >/dev/null
+  # The set as binary data (a ConfigMap holds no folders, so the .tar.gz as mapping packs it), immutable and
+  # named for the set: the Deployment refers to it and pins its digest (wstl_digest).
+  local sha
+  sha="$(wstl_digest "$STATE/wstl-us-core.tar.gz")"
+  kc -n sdh-fhir create configmap "$t-wstl-${sha:0:12}" --from-file=set.tar.gz="$STATE/wstl-us-core.tar.gz" \
+    --dry-run=client -o yaml | sed '1a immutable: true' | kc apply -f - >/dev/null
   kc -n sdh-fhir delete secret,configmap "fhir-$p" --ignore-not-found >/dev/null
 }
 

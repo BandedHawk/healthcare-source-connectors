@@ -142,15 +142,29 @@ test, before production:
    in it), which the stage can't otherwise detect. Don't deploy such a set (STAGES.md §17.10.2).
 4. **Validate the bundles** against the profile the set says it makes (`makes`; US Core 6.1 for C-CDA), with the
    validator your gold readers rely on.
-5. **Deploy it in production** as §3.2, and check that the release `stage.version_changed` names, and `version`
-   lists, carries the set's name, version and digest as tested. Records already in gold stay as the old set made
-   them; to map them again under the new one, reprocess them (`--made-by`), which keeps the old ones, superseded
-   (§4, "Its data").
+5. **Pin it, and deploy it in production** as §3.2. `set-digest` prints the set's digest as the stage computes it
+   (the transform stage's README, "The WSTL set"); give it to the stage as `sdh.transform.wstl-digest`, and the
+   stage refuses to start with any other set (`transform.set_not_loaded`, naming both digests). Put the set in a
+   new immutable ConfigMap named for it, and change the Deployment's ConfigMap and pin together: a new set is then
+   always a change of the Deployment, which `kubectl rollout undo` takes back with the set. Check that the release
+   `stage.version_changed` names, and `version` lists, carries the set's name, version and digest as tested.
+   Records already in gold stay as the old set made them; to map them again under the new one, reprocess them
+   (`--made-by`), which keeps the old ones, superseded (§4, "Its data").
 
 **Who may change it.** The set is a ConfigMap mounted read only, not part of the signed image (STAGES.md §17.10.2),
-so whoever can edit that ConfigMap can change how PHI is mapped. Give write access to it only to those who may
-deploy the stage (Kubernetes RBAC), and compare each new release's digest with the one tested: a version change that
-no ticket accounts for is a security incident to look into (HIPAA-OPERATIONS.md §6). The set isn't signed (§7).
+so whoever can change it, or the Deployment, can change how PHI is mapped. Give write access to both only to those
+who may deploy the stage (Kubernetes RBAC). With the pin, a set can't be swapped without the Deployment being
+changed too, which the API server's audit log records; a version change that no ticket accounts for is a security
+incident to look into (HIPAA-OPERATIONS.md §6). **Never edit a set's ConfigMap in place:** a mounted ConfigMap
+changed in place is changed under the running pods, which go on with the set they loaded, while each new pod (KEDA
+scaling out, a restart, a node drained) loads the new one, a new release the drain check holds back, not ready, so
+the stage quietly loses the pods it scales to. An immutable ConfigMap refuses the edit. The set isn't signed (§7).
+
+**Why not send a set to running pods.** A set is code that decides what PHI goes into gold, and the stage's
+guarantees rest on a pod's set being fixed for its life: an item made under one version, the drain check, and
+reprocess outcomes compared by version. A way to load a set into a running pod would break those, and would be a
+way into pods that hold decrypted PHI, needing its own permission, signature check, approval and audit: what a
+Deployment change already has. A new set needs no new image, only a rollout.
 
 ### 3.5 Changing a pipeline's configuration
 
@@ -282,7 +296,11 @@ carries the fix. How quickly the vendor releases a fix is D11's.
   authenticates; never the values), and `intake.changed`, for review, when it differs from the last start.
 - **Changing an intake's type under the same name is untested:** what the ledger takes for already landed when the
   same relative paths appear on a new source (§3.5, step 4).
-- **A WSTL set isn't signed,** and no command prints a set's digest to compare with the one tested (§3.4).
+- **There is no way for a customer to build its own WSTL set.** §3.4 assumes a set in hand, but sets are packaged
+  only by the vendor's mapping build: there is no template, packaging tool, local runner or guide for a
+  proprietary CSV or other custom mapping (KNOWN-GAPS.md §5).
+- **A WSTL set isn't signed** (§3.4). The pin (`sdh.transform.wstl-digest`) ties what runs to what was tested,
+  but an unpinned stage loads any set, and nothing requires the pin under the `hipaa` profile.
 - **The vendor's commitments are unanswered** (D11, drafted as [VENDOR-COMMITMENTS.md](VENDOR-COMMITMENTS.md)):
   how soon a fix for a High or Critical vulnerability is released, how long a release is supported, and how to
   report a vulnerability. The release registry and where releases are published are not set up yet (DESIGN.md

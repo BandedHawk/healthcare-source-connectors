@@ -167,7 +167,7 @@ somewhere safe.
 |---|---|
 | `secrets/` | Database passwords, Kafka users' passwords (`kafka-<user>`) and the key passphrases, made once. The kept Postgres volume has the passwords set, so without this directory nobody can log in. |
 | `keys/` | The stages' inbox key pairs and gold's readers' key pair, made once by `k8s/pipeline/apply.sh`, and the KMS signing keys' public halves. What was sealed to these keys can't be opened without them. |
-| `images.env`, `wstl-us-core.tar.gz` | The images' digests (`build-images.sh`) and the transform stage's US Core set. |
+| `images.env`, `wstl-us-core.tar.gz`, `wstl-us-core.tar.gz.digest` | The images' digests (`build-images.sh`), the transform stage's US Core set, and the set's digest (`set-digest`), which names its ConfigMap and pins the stage. |
 | `sessions` | The session log behind the 8-hour day. |
 | `kubeconfig` | Access to the current cluster. |
 | `pki/` | The PoC's CA, and the certificates it issued to Postgres, PgBouncer and Kafka (docs/AWS-POC.md §8.2). Every pipeline trusts `pki/ca.crt`. |

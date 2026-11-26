@@ -13,6 +13,7 @@ sdh:
   results: { enabled: false }
   transform:
     wstl: /etc/sdh/wstl/set.tar.gz
+    # wstl-digest: pinned on the Deployment (SDH_TRANSFORM_WSTLDIGEST), the set's digest as set-digest prints it
   stage:
     input:
       type: kafka

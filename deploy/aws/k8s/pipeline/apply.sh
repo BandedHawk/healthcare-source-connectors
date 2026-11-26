@@ -126,6 +126,25 @@ apply_config() {  # <namespace> <name> <kubectl create configmap args>...
   kc -n "$n" create configmap "$name" "$@" --dry-run=client -o yaml | kc apply -f - >/dev/null
 }
 
+# wstl_digest <set.tar.gz>: the set's digest, as the transform stage computes it (its set-digest command, from the
+# transformer's jar), kept beside the set as <set>.digest until the set changes. The set's ConfigMap is named by
+# its first 12 hex digits, immutable, and the stage pinned to it (sdh.transform.wstl-digest), so a new set is a new
+# ConfigMap and a change of the Deployment, never an edit under running pods.
+wstl_digest() {
+  local set="$1" jar
+  if [[ ! -s "$set.digest" || "$set.digest" -ot "$set" ]]; then
+    jar="$(ls "$TRANSFORMER"/transform-stage/target/transform-stage-*.jar 2>/dev/null \
+      | grep -v -e '-sources' -e '-javadoc' | head -n 1 || true)"
+    [[ -n "$jar" ]] || die "no transformer jar in $TRANSFORMER/transform-stage/target:" \
+      "build the transformer (deploy/aws/build-images.sh)"
+    java -jar "$jar" set-digest "$set" 2>/dev/null | awk '{print $1}' > "$set.digest.tmp" || true
+    grep -qE '^[0-9a-f]{64}$' "$set.digest.tmp" \
+      || { rm -f "$set.digest.tmp"; die "set-digest could not read the WSTL set $set"; }
+    mv "$set.digest.tmp" "$set.digest"
+  fi
+  cat "$set.digest"
+}
+
 # queue_retention <pipeline>: the convert and transform stages' input topics kept QUEUE_RETENTION, or the
 # broker's default (any override removed) when it is unset.
 queue_retention() {
@@ -225,7 +244,8 @@ wstl="$STATE/wstl-us-core.tar.gz"
 set_src="$TRANSFORMER/transform-stage/target/test-sets/us-core.tar.gz"
 if [[ -s "$set_src" ]] && ! cmp -s "$set_src" "$wstl"; then cp "$set_src" "$wstl"; fi
 [[ -s "$wstl" ]] || die "no US Core set at $set_src: build the transformer (deploy/aws/build-images.sh)"
-for t in kubectl aws openssl envsubst; do command -v "$t" >/dev/null || die "missing tool: $t"; done
+for t in kubectl aws openssl envsubst java; do command -v "$t" >/dev/null || die "missing tool: $t"; done
+wstl_sha="$(wstl_digest "$wstl")"
 kc get ns sdh-infra >/dev/null || die "no cluster, or no sdh-infra: run deploy/aws/poc.sh up"
 mkdir -p "$STATE/keys"; chmod 700 "$STATE/keys"
 
@@ -310,8 +330,10 @@ deploy_pipeline() {
     --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas "transform-$p")" \
     --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "fhir-recipient-passphrase-$p")"
   apply_config sdh-fhir "$t-config" --from-file=application.yml="$work/transform-application.yml"
-  # The set as binary data: a ConfigMap holds no folders.
-  apply_config sdh-fhir "$t-wstl" --from-file=set.tar.gz="$wstl"
+  # The set as binary data (a ConfigMap holds no folders), immutable, named for the set: the Deployment below
+  # refers to it and pins its digest. Re-applying the same set changes nothing.
+  kc -n sdh-fhir create configmap "$t-wstl-${wstl_sha:0:12}" --from-file=set.tar.gz="$wstl" --dry-run=client \
+    -o yaml | sed '1a immutable: true' | kc apply -f - >/dev/null
 
   # Each stage from the Deployment in its README, renamed as in the sandbox, by digest.
   mkdir -p "$work/landing" "$work/splitter" "$work/convert" "$work/transform"
@@ -331,6 +353,7 @@ deploy_pipeline() {
   readme_yaml "$TRANSFORMER/transform-stage/src/dist/README.md" \
     | sed -e "s#<registry>/transform-stage:<version>#$transform_stage#" \
           -e "s/transform-stage-\(env\|keys\|config\|wstl\)/$t-\1/g" \
+          -e "s/<set id>/${wstl_sha:0:12}/g" -e "s/<set digest>/$wstl_sha/g" \
           -e "s/name: transform-stage }/name: $t }/" -e "s/app: transform-stage }/app: $t }/g" \
     > "$work/transform/transform.yaml"
   local f
@@ -385,6 +408,8 @@ deploy_pipeline() {
   kc apply -k "$work/transform" >/dev/null
   { kc -n sdh-fhir rollout status "deploy/$t" --timeout=420s >/dev/null \
       && wait_for 300 logged sdh-fhir "deploy/$t" "Started TransformStageApplication"; } || failed sdh-fhir "deploy/$t"
+  # The set's ConfigMap from before sets had their own (named $t-wstl, edited in place): nothing refers to it now.
+  kc -n sdh-fhir delete configmap "$t-wstl" --ignore-not-found >/dev/null
 
   local duties
   for duties in "$n splitter-duties" "$n convert-duties" "sdh-fhir $t-duties"; do

@@ -2,7 +2,8 @@
 # records in the silver bucket, maps each with the US Core 6.1 set, fail-fast, and stores the bundle, or the record
 # as it came if it fails, in fhir in the gold bucket, sealed to gold's consumer key and announced on
 # <pipeline>.fhir. Mounted from the ConfigMap transform-<pipeline>-config, as the transform stage's README
-# describes; the set from the ConfigMap transform-<pipeline>-wstl. ${...} in capitals with a prefix are filled in
+# describes; the set from the immutable ConfigMap transform-<pipeline>-wstl-<12 hex of its digest>, pinned by the
+# Deployment's SDH_TRANSFORM_WSTLDIGEST. ${...} in capitals with a prefix are filled in
 # by scripts/sandbox.sh; ${S3_SECRET_ACCESS_KEY} and ${SDH_LEASE_JDBC_PASSWORD} are left for Spring, from the
 # secret transform-<pipeline>-env. Keys are in the secret transform-<pipeline>-keys, at /run/secrets. Producer
 # results are off, as at the other stages here (docs/SANDBOX.md).

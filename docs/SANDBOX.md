@@ -287,7 +287,8 @@ a US Core check, so expect most records there. Per pipeline, in the namespace `s
 - the Deployment `transform-<pipeline>`, from its kit README's, one to two pods of 1,088 MiB (Memory, above),
   scaled by KEDA on the lag of `transform-<pipeline>` on `<pipeline>.records`;
 - its settings `deploy/sandbox/fhir/transform-application.yml` in the ConfigMap `transform-<pipeline>-config`; the
-  set, as mapping packs it (a `.tar.gz`), in `transform-<pipeline>-wstl`, made by `images` from the transformer's
+  set, as mapping packs it (a `.tar.gz`), in the immutable `transform-<pipeline>-wstl-<first 12 hex of its digest>`,
+  with the stage pinned to the digest (`SDH_TRANSFORM_WSTLDIGEST`), made by `images` from the transformer's
   build (`SDH_TRANSFORMER`, by default `../healthcare-data-transformer`; mapping installed first);
 - the topics `<pipeline>.records` (its input, 6 partitions), `<pipeline>.fhir` (its output) and
   `<pipeline>.fhir.dlq`; the gold bucket and an S3 key that reads silver and writes gold; a database role; a
