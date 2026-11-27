@@ -129,6 +129,8 @@ work, beyond this project ([PAYER-X12-FUTURE-WORK.md](../PAYER-X12-FUTURE-WORK.m
 | No dashboards or alert rules are shipped | a Grafana dashboard and a Prometheus rule file in the kits, from OBSERVABILITY.md §6.1 | OBSERVABILITY.md §9 |
 | The convert and transform stages send no traces, and traces don't join across stages | spans for the record stages; the trace context carried on the stages' messages | OBSERVABILITY.md §6.2, §9 |
 | The control harness runs its scenarios only against its own targets (Testcontainers, the sandbox, the AWS PoC), not a customer's cluster | a target configured by control URL, issuer and namespace, so a customer can run the scenarios on their test environment before go-live | ENVIRONMENT-SETUP.md §7, §11 |
+| The US Core 6.1 set gives a `terminology.hl7.org` URI for only 14 HL7 v3 code systems; any other v3 OID (such as RouteOfAdministration, ObservationValue) reaches a terminology server as `urn:oid:` | map every `hl7.terminology.r4` v3 code system's OID to its canonical URI in `common::KnownCodeSystem` | mapping us-core-6.1 dist README, "HL7 v3" |
+| The transform stage keeps no warnings from the set, so readers can't see which codings it flagged (a code with no code system) | keep warnings' codes and places with the item, as failures are kept, if readers need them | transform-stage README, "The WSTL set" |
 | The product can't tell a Part 2 record | none, unless P2 or P3 asks for one | D10 §4 |
 | No X12 transaction is mapped to FHIR (837, 835, 834, 278 to CARIN Blue Button, CARIN Digital Insurance Card, PDex), and NCPDP isn't read | a future project: mappings as WSTL sets, in the order Q5 decides, each validated against its IG | PAYER-X12-FUTURE-WORK.md §3.5 |
 | A claim and its payment (837 and 835) can't be joined: one type of content per pipeline | a future project: two pipelines joined after gold, revising the EOB as each part arrives, with a visible held state | PAYER-X12-FUTURE-WORK.md §4 |
@@ -144,6 +146,7 @@ work, beyond this project ([PAYER-X12-FUTURE-WORK.md](../PAYER-X12-FUTURE-WORK.m
 | Only Prometheus's OTLP receiver and Grafana LGTM have received the telemetry; a collector with a private CA is untried | the sandbox, with each back end's trial (OBSERVABILITY.md §5) and an `https://` collector | OBSERVABILITY.md §9 |
 | Formats beyond C-CDA and CSV at the pipeline level: X12, EDIFACT, delimited, XML, FHIR, Parquet; X12 at a payer's size, with history since 2016 | locally or the sandbox; size on AWS | D10 §4; DEPLOYMENT.md, "Formats" |
 | The release before run against tables a newer release made | locally | UPGRADES.md §7 |
+| No terminology server has been run against the pipeline's gold; only the HL7 validator against tx.fhir.org, on the set's public samples | locally, with a terminology server loaded as the US Core set's README says, and synthetic documents | mapping us-core-6.1 dist README, "Setting up your terminology server" |
 | An intake's type changed under the same name (a directory to SFTP): what the ledger takes for already landed | locally | UPGRADES.md §3.5, §7 |
 | A whole-pipeline upgrade timed at size | the AWS session (HIPAA.md §11.4), with its cost approved | UPGRADES.md §7 |
 | The transform stage's control API deployed, and through an ingress | the sandbox | CONTROL-API-DEPLOYMENT.md §9 |
