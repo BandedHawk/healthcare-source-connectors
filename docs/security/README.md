@@ -16,6 +16,8 @@ and settings each statement comes from, so a reviewer can check it.
 | D7 | [Audit event catalogue](AUDIT-EVENTS.md) | written 2026-11-25; `AuditEventsCatalogueTest` checks it lists every event |
 | D8 | Backup, restore and disaster recovery | in [HIPAA-OPERATIONS.md](../HIPAA-OPERATIONS.md) §7 |
 | D13 | [Control API deployment and use](CONTROL-API-DEPLOYMENT.md) | written 2026-11-25; `ControlDeploymentGuideTest` checks it describes every control API setting |
+| D15 | [Connecting an identity provider to the control API](IDENTITY-PROVIDER.md) | written 2026-11-26: Entra ID, Okta, Keycloak and Cognito, from their documentation; none tried yet |
+| D16 | [Wiring observability](OBSERVABILITY.md) | written 2026-11-26: the stages' telemetry settings, the collector, back ends, metrics and alerts; Prometheus and LGTM tried |
 | D9 | [Retention and destruction](RETENTION.md) | written 2026-11-25; `RetentionGuideTest` checks it names every retention setting, data and audit admin command, and erasure certificate claim |
 | D12 | [Upgrades and patching](UPGRADES.md) | written 2026-11-25; `UpgradeGuideTest` checks it names every way a release is let in, that the kits' stage Deployments add a pod first, and that releases only add to their tables |
 | D10 | [The clearinghouse question and Part 2](CLEARINGHOUSE-PART2.md) | **draft** 2026-11-25: open questions C1–C5, P1–P3 for counsel and the product owner (§5 there) |

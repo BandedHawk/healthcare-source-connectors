@@ -214,9 +214,11 @@ The collector's onward link to the store must use TLS.
 and point `sdh.telemetry.otlp.endpoint` at it. The settings above apply unchanged, with a file-storage directory
 on local disk.
 
-The exporters and their options belong to the collector, not to the product. Check them against the documentation
-for the collector version you deploy. **Only the Loki path has been run** (the sandbox); the others have not been
-tried in our environments. Example configurations for each store are to come (HIPAA.md §8.1 item 15).
+The whole collector, with its metrics and traces pipelines, the stages' resource attributes, and what to watch,
+is [security/OBSERVABILITY.md](security/OBSERVABILITY.md). The exporters and their options belong to the
+collector, not to the product. Check them against the documentation for the collector version you deploy. **Only
+the Loki path has been run** (the sandbox); the others have not been tried in our environments. Example
+configurations for each store are to come (HIPAA.md §8.1 item 15).
 
 #### Checking it works
 

@@ -139,6 +139,9 @@ since nothing in front of the pod can read the traffic.
 
 ## 3. Connecting the identity provider
 
+Step by step for each provider, with where the control API is, getting a token and what each refusal means,
+is [IDENTITY-PROVIDER.md](IDENTITY-PROVIDER.md). This section gives what it rests on.
+
 ### 3.1 Tokens, for people
 
 Register the control API with the identity provider as an API, or resource server, with:
