@@ -148,6 +148,10 @@
     <!-- kafka-clients 4.2.2 and camel-kafka bring 1.11.1 and 1.1.10.7 -->
     <lz4-java.version>1.11.4</lz4-java.version>
     <snappy-java.version>1.1.10.12</snappy-java.version>
+    <!-- Spring Boot 4.1.2 brings Tomcat 11.0.27 (2 Critical, 7 High CVEs, fixed in 11.0.29); all three kept alike -->
+    <tomcat.version>11.0.29</tomcat.version>
+    <!-- the Azure Service Bus client brings 0.34.1 (GHSA-p2gc-fm5w-94jj, High) -->
+    <proton-j.version>0.35.0</proton-j.version>
   </properties>
 
   <dependencyManagement>
@@ -179,6 +183,26 @@
         <groupId>org.xerial.snappy</groupId>
         <artifactId>snappy-java</artifactId>
         <version>${snappy-java.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.tomcat.embed</groupId>
+        <artifactId>tomcat-embed-core</artifactId>
+        <version>${tomcat.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.tomcat.embed</groupId>
+        <artifactId>tomcat-embed-websocket</artifactId>
+        <version>${tomcat.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.tomcat.embed</groupId>
+        <artifactId>tomcat-embed-el</artifactId>
+        <version>${tomcat.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.qpid</groupId>
+        <artifactId>proton-j</artifactId>
+        <version>${proton-j.version}</version>
       </dependency>
       <dependency>
         <groupId>org.apache.iceberg</groupId>
