@@ -7,6 +7,9 @@ keep. It is HIPAA.md §11.2's document D1. What each connection carries is [DATA
 control API is exposed is [CONTROL-API-DEPLOYMENT.md](CONTROL-API-DEPLOYMENT.md) §2; who may reach the cluster
 is [IDENTITY.md](IDENTITY.md).
 
+Where this falls in setting up an environment, with the guards around it (egress firewall, WAF, flow logs, threat
+detection), is [ENVIRONMENT-SETUP.md](ENVIRONMENT-SETUP.md) §1.
+
 It describes a pipeline deployed from `deploy/reference/` and the kits' READMEs, with the `hipaa` compliance profile
 on, one pipeline to a namespace (HIPAA-OPERATIONS.md §2.8). The network policies of §4 are a starting point written
 from the ones the AWS PoC and the sandbox run (`deploy/aws/k8s/`, `deploy/sandbox/`); the sandbox's harness pipeline

@@ -1017,6 +1017,9 @@ it was last in effect (§ 164.316(b)(2)(i)).
 
 ## 11. Penetration testing: the customer's, and what to secure first
 
+Where the test falls in setting up an environment, its scope, rules of engagement and retest, are
+[security/ENVIRONMENT-SETUP.md](security/ENVIRONMENT-SETUP.md) §8.
+
 **The penetration test is the customer's to commission,** by a third party of their choosing, against their own
 deployment: the proposed Security Rule asks for one every 12 months (HIPAA.md §7), and buyers expect one before
 real PHI. The product's vendor does not test a customer's deployment, and has not had the product itself tested by
