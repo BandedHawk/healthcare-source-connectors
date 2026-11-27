@@ -8,8 +8,9 @@
 #   SDH_SKIP_BUILD=1 ...                            # reuse the tarball and images already built
 #   SDH_ALLOW_STALE_BASE=1 ...                      # sign although a pinned base image has a newer build (warns)
 #
-# Covers the three applications: the landing node (landing-connector), the split stage (file-connector, images
-# sdh/split-stage) and the convert stage (convert-stage). Signs:
+# Covers the four applications: the landing node (landing-connector), the split stage (file-connector, images
+# sdh/split-stage), the convert stage (convert-stage), and the transform stage (transform-stage, from the
+# healthcare-data-transformer project beside this one, SDH_TRANSFORMER, at its own version). Signs:
 #   - each distribution tarball: a detached signature (<app>-<v>-dist.tar.gz.sig), verifiable with cosign or with
 #     openssl alone;
 #   - each customer image and service image: cosign signatures in the registry, next to each image, plus a signed
@@ -24,6 +25,8 @@
 #                     Azure credentials come from AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_CLIENT_SECRET (a service
 #                     principal with the Key Vault Crypto User role on the key). A key file path also works, with
 #                     COSIGN_PASSWORD.
+#   SDH_TRANSFORMER   the healthcare-data-transformer folder (default: ../healthcare-data-transformer). It is built
+#                     on this repository's libraries, so they are installed in the local Maven repository first.
 #   SDH_REGISTRY      where images are pushed and signed, e.g. myregistry.azurecr.io/sdh. Unset: a throwaway
 #                     registry (registry:2) on localhost:5000 inside the VM. Log in with `docker login` first; the
 #                     credentials in ~/.docker/config.json are passed to cosign.
@@ -39,6 +42,9 @@ COSIGN_IMAGE="gcr.io/projectsigstore/cosign:v2.4.1"
 SYFT_IMAGE="anchore/syft:v1.54.1"
 REGISTRY_IMAGE="registry:2.8.3"
 APPS=(landing-connector file-connector convert-stage)
+TRANSFORMER="$(cd "${SDH_TRANSFORMER:-$ROOT/../healthcare-data-transformer}" && pwd)"
+TRANSFORM="$TRANSFORMER/transform-stage"
+[[ -f "$TRANSFORM/pom.xml" ]] || { echo "No transform stage at $TRANSFORM: set SDH_TRANSFORMER" >&2; exit 1; }
 OUT="$ROOT/target/release"
 
 echo ">> Base images (docker/base-images.env)"
@@ -52,19 +58,28 @@ if ! "$ROOT/scripts/base-images.sh"; then
 fi
 
 if [[ "${SDH_SKIP_BUILD:-0}" != "1" ]]; then
-  (cd "$ROOT" && ./mvnw -q -pl landing-connector,file-connector,convert-stage -am -Pdist verify -DskipTests)
+  # Installed, not only verified: the transform stage is built on these libraries from the local repository.
+  (cd "$ROOT" && ./mvnw -q -Pdist install -DskipTests)
+  (cd "$TRANSFORMER" && ./mvnw -q -Pdist verify -DskipTests)
 fi
 VERSION="$(cd "$ROOT" && ./mvnw -q -N help:evaluate -Dexpression=project.version -DforceStdout)"
+TRANSFORM_VERSION="$(cd "$TRANSFORMER" && ./mvnw -q -N help:evaluate -Dexpression=project.version -DforceStdout)"
+# Each application's folder and version, for its tarball and jar SBOM.
+declare -A APP_DIR=() APP_VERSION=()
+for app in "${APPS[@]}"; do APP_DIR[$app]="$ROOT/$app"; APP_VERSION[$app]="$VERSION"; done
+APPS+=(transform-stage)
+APP_DIR[transform-stage]="$TRANSFORM"; APP_VERSION[transform-stage]="$TRANSFORM_VERSION"
 for app in "${APPS[@]}"; do
-  tarball="$ROOT/$app/target/$app-$VERSION-dist.tar.gz"
+  tarball="${APP_DIR[$app]}/target/$app-${APP_VERSION[$app]}-dist.tar.gz"
   [[ -f "$tarball" ]] || { echo "No tarball at $tarball; build with -Pdist" >&2; exit 1; }
 done
 
 source "$ROOT/scripts/minikube-env.sh"
 if [[ "${SDH_SKIP_BUILD:-0}" != "1" ]]; then
   for app in "${APPS[@]}"; do
-    SDH_IT_STOP=0 SDH_SKIP_MAVEN=1 "$ROOT/scripts/build-image.sh" "$app" customer
-    SDH_IT_STOP=0 SDH_SKIP_MAVEN=1 "$ROOT/scripts/build-image.sh" "$app" service
+    target="$app"; [[ "$app" == transform-stage ]] && target="$TRANSFORM"   # a module of another project
+    SDH_IT_STOP=0 SDH_SKIP_MAVEN=1 "$ROOT/scripts/build-image.sh" "$target" customer
+    SDH_IT_STOP=0 SDH_SKIP_MAVEN=1 "$ROOT/scripts/build-image.sh" "$target" service
   done
 fi
 
@@ -131,19 +146,21 @@ fi
 echo ">> Distribution tarballs"
 TAR_NAMES=()
 for app in "${APPS[@]}"; do
-  tarball="$ROOT/$app/target/$app-$VERSION-dist.tar.gz"
+  tarball="${APP_DIR[$app]}/target/$app-${APP_VERSION[$app]}-dist.tar.gz"
   TAR_NAMES+=("$(basename "$tarball")")
   cp "$tarball" "$OUT/"
-  cp "$ROOT/$app/target/sbom.cdx.json" "$OUT/$app-$VERSION-jar.cdx.json"
+  cp "${APP_DIR[$app]}/target/sbom.cdx.json" "$OUT/$app-${APP_VERSION[$app]}-jar.cdx.json"
   put "$tarball" "$(basename "$tarball")"
   echo "   $(basename "$tarball")"
 done
 
 : > "$OUT/image-digests.txt"
-for name in landing-connector landing-connector-service split-stage split-stage-service \
-  convert-stage convert-stage-service; do
-  local_tag="sdh/$name:$VERSION"
-  remote_tag="$REGISTRY/$name:$VERSION"
+for image in landing-connector:$VERSION landing-connector-service:$VERSION split-stage:$VERSION \
+  split-stage-service:$VERSION convert-stage:$VERSION convert-stage-service:$VERSION \
+  transform-stage:$TRANSFORM_VERSION transform-stage-service:$TRANSFORM_VERSION; do
+  name="${image%%:*}"; version="${image#*:}"
+  local_tag="sdh/$name:$version"
+  remote_tag="$REGISTRY/$name:$version"
   echo ">> Image $local_tag"
   docker tag "$local_tag" "$remote_tag"
   docker push -q "$remote_tag" >/dev/null
@@ -153,8 +170,8 @@ for name in landing-connector landing-connector-service split-stage split-stage-
   echo "   pushed: $ref"
   # The image's own SBOM: OS packages and the Java components in app.jar.
   syft "registry:$ref" -q -o "cyclonedx-json=/work/$name.cdx.json"
-  get "$name.cdx.json" "$OUT/$name-$VERSION-image.cdx.json"
-  echo "   SBOM: $name-$VERSION-image.cdx.json"
+  get "$name.cdx.json" "$OUT/$name-$version-image.cdx.json"
+  echo "   SBOM: $name-$version-image.cdx.json"
 done
 
 # Pushed but not yet signed: an unsigned image doesn't verify, so nothing trusts it if the scan stops the release.

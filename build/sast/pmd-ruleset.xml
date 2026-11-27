@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Interim SAST (KNOWN-GAPS.md §3): the PMD rules run by `./mvnw -Psast verify`. A short list of security,
+  error-prone and concurrency rules, not PMD's whole catalogue, so that a finding is worth reading. Style is
+  checked elsewhere (the code conventions), not here. To remove: delete this folder and the root pom's sast
+  profile.
+-->
+<ruleset name="sdh-sast"
+         xmlns="http://pmd.sourceforge.net/ruleset/2.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://pmd.sourceforge.net/ruleset/2.0.0 https://pmd.sourceforge.io/ruleset_2_0_0.xsd">
+  <description>Security, error-prone and concurrency rules for the interim static analysis.</description>
+
+  <!-- Hard-coded keys and IVs. -->
+  <rule ref="category/java/security.xml"/>
+
+  <!-- Exceptions: a stack trace or message printed can carry PHI (the logging rule); a lost cause hides faults. -->
+  <rule ref="category/java/bestpractices.xml/AvoidPrintStackTrace"/>
+  <rule ref="category/java/errorprone.xml/EmptyCatchBlock"/>
+  <rule ref="category/java/errorprone.xml/AvoidLosingExceptionInformation"/>
+  <rule ref="category/java/errorprone.xml/ReturnFromFinallyBlock"/>
+  <rule ref="category/java/errorprone.xml/AvoidCatchingNPE"/>
+
+  <!-- Resources and comparisons. -->
+  <rule ref="category/java/errorprone.xml/CloseResource"/>
+  <rule ref="category/java/errorprone.xml/CompareObjectsWithEquals"/>
+  <rule ref="category/java/errorprone.xml/UseEqualsToCompareStrings"/>
+  <rule ref="category/java/errorprone.xml/EqualsNull"/>
+  <rule ref="category/java/errorprone.xml/BrokenNullCheck"/>
+  <rule ref="category/java/errorprone.xml/MisplacedNullCheck"/>
+
+  <!-- Control flow. -->
+  <rule ref="category/java/errorprone.xml/ImplicitSwitchFallThrough"/>
+  <rule ref="category/java/errorprone.xml/JumbledIncrementer"/>
+  <rule ref="category/java/errorprone.xml/AvoidBranchingStatementAsLastInLoop"/>
+  <rule ref="category/java/errorprone.xml/ConstructorCallsOverridableMethod"/>
+  <rule ref="category/java/bestpractices.xml/CheckResultSet"/>
+
+  <!-- Dead code that may hide a mistake. -->
+  <rule ref="category/java/bestpractices.xml/UnusedPrivateField"/>
+  <rule ref="category/java/bestpractices.xml/UnusedPrivateMethod"/>
+  <rule ref="category/java/bestpractices.xml/UnusedLocalVariable"/>
+
+  <!-- Concurrency. -->
+  <rule ref="category/java/multithreading.xml/DoubleCheckedLocking"/>
+  <rule ref="category/java/multithreading.xml/NonThreadSafeSingleton"/>
+  <rule ref="category/java/multithreading.xml/UnsynchronizedStaticFormatter"/>
+</ruleset>

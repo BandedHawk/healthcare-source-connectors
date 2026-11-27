@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Interim SAST (KNOWN-GAPS.md §3): what SpotBugs and Find Security Bugs leave out of `./mvnw -Psast verify`.
+  Each exclusion names its reason. Prefer a narrow one (a bug pattern in one class) to a wide one; review them
+  with the vulnerability exceptions (docker/vuln-accepted.yaml) at each release. To remove: delete this folder
+  and the root pom's sast profile.
+-->
+<FindBugsFilter
+    xmlns="https://github.com/spotbugs/filter/3.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="https://github.com/spotbugs/filter/3.0.0 https://raw.githubusercontent.com/spotbugs/spotbugs/master/spotbugs/etc/findbugsfilter.xsd">
+  <!-- Exposing or storing a mutable object (records and settings holding lists and maps): style, not security,
+       and thousands of hits across the settings records. -->
+  <Match>
+    <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+  </Match>
+  <!-- "\n" rather than "%n" in a format string: the stages run on Linux, and their CLI output is read there. Style,
+       and most of a first run's findings (172). -->
+  <Match>
+    <Bug pattern="VA_FORMAT_STRING_USES_NEWLINE"/>
+  </Match>
+</FindBugsFilter>

@@ -77,13 +77,14 @@ pipeline; they are tracked in [KNOWN-GAPS.md](KNOWN-GAPS.md) §3 until then.
 
 - **No release has been published.** The release registry, and where tarballs, signatures and `cosign.pub` are
   published, are not set up (DESIGN.md §14.4).
-- **The transform stage isn't in the release script.** `sign-release.sh` builds, scans, signs and verifies the
-  landing, split and convert stages; the transform stage, from its own repository, has a "Verify what you
-  received" section in its README but no release run behind it yet.
+- **The transform stage has no release run behind it yet.** `sign-release.sh` now builds, scans, signs and
+  verifies it with the other three stages, but hasn't been run since it was added.
 - **Releases are built and signed on a workstation,** not in the standard CI pipeline, so there is no build
   provenance attestation (SLSA) yet.
-- **No static or dynamic security scans, and no secrets scanning,** run on the PoC's builds: they are part of the
-  standard process, not of the PoC's tooling.
+- **No dynamic security scans, and no secrets scanning,** run on the PoC's builds: they are part of the standard
+  process, not of the PoC's tooling. **Static analysis** runs only as an interim, report-only step
+  (`./mvnw -Psast verify`: SpotBugs with Find Security Bugs, and PMD), until the standard process's scans replace
+  it; its findings haven't been triaged yet.
 - **FIPS 140 is not supported** ([HARDENING.md](HARDENING.md); each kit's README): no FIPS 140-validated module is
   used or tested.
 - **No penetration test of the product by the vendor.** Customers test their own deployments (HIPAA.md §11.1 P13);

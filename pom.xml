@@ -999,6 +999,93 @@
 
   <profiles>
     <!--
+      Interim static analysis (SAST), until the corporate build pipeline takes it over (KNOWN-GAPS.md §3):
+      SpotBugs with Find Security Bugs, and PMD with build/sast/pmd-ruleset.xml. Report only: it fails nothing.
+      Never part of the normal build, and inherited by projects built on this one (the transformer), each with a
+      build/sast/ folder of its own. Run: ./mvnw -Psast verify -DskipTests. Reports: each module's
+      target/spotbugsXml.xml and target/pmd.xml. To remove: delete this profile and each build/sast/ folder.
+    -->
+    <profile>
+      <id>sast</id>
+      <properties>
+        <sast.dir>${maven.multiModuleProjectDirectory}/build/sast</sast.dir>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>com.github.spotbugs</groupId>
+            <artifactId>spotbugs-maven-plugin</artifactId>
+            <version>4.10.5.0</version>
+            <dependencies>
+              <dependency>
+                <groupId>com.github.spotbugs</groupId>
+                <artifactId>spotbugs</artifactId>
+                <version>4.10.5</version>
+              </dependency>
+            </dependencies>
+            <configuration>
+              <effort>Max</effort>
+              <threshold>Medium</threshold>
+              <failOnError>false</failOnError>
+              <excludeFilterFile>${sast.dir}/spotbugs-exclude.xml</excludeFilterFile>
+              <plugins>
+                <plugin>
+                  <groupId>com.h3xstream.findsecbugs</groupId>
+                  <artifactId>findsecbugs-plugin</artifactId>
+                  <version>1.14.0</version>
+                </plugin>
+              </plugins>
+            </configuration>
+            <executions>
+              <execution>
+                <id>sast-spotbugs</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>check</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-pmd-plugin</artifactId>
+            <version>3.28.0</version>
+            <dependencies>
+              <dependency>
+                <groupId>net.sourceforge.pmd</groupId>
+                <artifactId>pmd-java</artifactId>
+                <version>7.30.0</version>
+              </dependency>
+              <dependency>
+                <groupId>net.sourceforge.pmd</groupId>
+                <artifactId>pmd-core</artifactId>
+                <version>7.30.0</version>
+              </dependency>
+            </dependencies>
+            <configuration>
+              <rulesets>
+                <ruleset>${sast.dir}/pmd-ruleset.xml</ruleset>
+              </rulesets>
+              <targetJdk>${maven.compiler.release}</targetJdk>
+              <includeTests>false</includeTests>
+              <linkXRef>false</linkXRef>
+              <failOnViolation>false</failOnViolation>
+              <printFailingErrors>true</printFailingErrors>
+            </configuration>
+            <executions>
+              <execution>
+                <id>sast-pmd</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>check</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <!--
       Integration tests that need a Docker API (Testcontainers): *IT classes, run by Failsafe.
       With minikube (KVM2), use scripts/it-minikube.sh, which starts a VM and points DOCKER_HOST at it.
     -->

@@ -61,11 +61,11 @@ there, and D11 §1 and each kit's "Verify what you received" revised to describe
 
 | Gap | To do in the production pipeline | Found in |
 |---|---|---|
-| No static analysis (SAST) of the code | the standard process's static scans, on every build of every module and of the transform stage's repository | D11 §1.4 |
+| No static analysis (SAST) of the code in the standard process. **Interim, 2026-11-27:** `./mvnw -Psast verify` runs SpotBugs 4.10.5 with Find Security Bugs 1.14.0, and PMD 7.30.0 with `build/sast/pmd-ruleset.xml`, in both repositories, report only. First run: 302 SpotBugs findings after the exclusions (231 of them `SQL_INJECTION_JDBC` on SQL built from table names), 164 PMD; the transformer 2 and 3. Not triaged; not in any build by default | the standard process's static scans, on every build of every module and of the transform stage's repository; then remove the `sast` profile and each `build/sast/` | D11 §1.4 |
 | No dynamic scans (DAST) | the standard process's dynamic scans, of the control API and the push intake on a running pipeline | this register; HIPAA.md P13 is the customer's own pen test, not this |
 | No secrets scanning of the code | the standard process's secrets scanning | D11 §1.4 |
 | Builds and signing on a workstation, so no build provenance (SLSA) | builds and signing in CI, with a provenance attestation beside each image's SBOM; the signing key stays in Key Vault | D11 §1.4 |
-| The transform stage isn't built, scanned or signed by `sign-release.sh` | all four stages released by the same pipeline; until then, add it to the script if a release is cut from the PoC | D11 §1.4 |
+| The transform stage was added to `sign-release.sh` on 2026-11-27 (its tarball, jar SBOM, customer and service images, scanned and signed with the others), but the script hasn't been run since: it stops on stale base image pins | all four stages released by the same pipeline; until then, update the pins (`scripts/base-images.sh update`, then the image tests) and run the script once | D11 §1.4 |
 | No release has been published: no release registry, nowhere for tarballs, signatures and `cosign.pub` | the production pipeline's registry and publication | D11 §1.4; DESIGN.md §14.4 |
 | No release notes | release notes with a release, under fixed headings: a contract major version, a table, a compliance check, a setting | UPGRADES.md §7 |
 | No rescans of released SBOMs | the pipeline's scheduled rescans of supported releases (V5) | D11 §2 |
