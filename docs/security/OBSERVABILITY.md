@@ -73,16 +73,15 @@ JVM's default trust store, so a certificate from your internal CA needs that CA 
 ### 2.2 Name each pod, and its pipeline
 
 Each stage reports its `service.name`: `landing-connector`, `file-connector` (the split stage), `convert-stage` or
-`transform-stage`. Its control pods use the same name. **Add, in every Deployment's pod template:**
+`transform-stage`. Its control pods use the same name. **Every kit Deployment, workers and control, sets in its
+pod template** (fill in `<pipeline>`; keep it if you write your own manifests):
 
 ```yaml
 env:
   - name: POD_NAME
     valueFrom: { fieldRef: { fieldPath: metadata.name } }
-  - name: POD_NAMESPACE
-    valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
   - name: OTEL_RESOURCE_ATTRIBUTES
-    value: "service.instance.id=$(POD_NAME),service.namespace=<pipeline>,k8s.namespace.name=$(POD_NAMESPACE)"
+    value: "service.instance.id=$(POD_NAME),service.namespace=<pipeline>"
 ```
 
 - **`service.instance.id`, one per pod, is not optional.** Without it every pod of a stage writes the same series:
@@ -274,10 +273,11 @@ local disk.
 
 ## 9. Findings
 
-- **The kits don't set `service.instance.id`.** Only the AWS PoC's patches do. Without it, a stage with more than
-  one pod reports wrong counts (§2.2). The kits' Deployments should set it, and the pipeline's name.
-- **No pipeline name on the telemetry.** A stage reports only its `service.name`; two pipelines are told apart only
-  by the attributes §2.2 adds. A `sdh.pipeline` resource attribute from the settings would make it automatic.
+- **`service.instance.id` was missing from the kits** until 2026-11-27; only the AWS PoC's patches set it, and a
+  stage with more than one pod reported wrong counts. The kits' Deployments now set it (§2.2). The sandbox's
+  manifests don't yet, and a deployment from older kit READMEs needs it added.
+- **The pipeline's name is filled in by hand.** A stage reports only its `service.name`, and the kits add
+  `service.namespace=<pipeline>`. A `sdh.pipeline` resource attribute from the settings would make it automatic.
 - **No dashboards or alert rules are shipped.** §6.1's alerts are a starting point written here, not tested rules.
   A Grafana dashboard and Prometheus rule file in the kits would save each customer writing them.
 - **Traces stop at the split stage, and don't join across stages:** the convert and transform stages create no

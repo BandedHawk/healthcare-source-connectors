@@ -333,6 +333,10 @@ spec:
           image: <registry>/landing-connector:<version>
           env:
             - { name: SPRING_CONFIG_ADDITIONAL_LOCATION, value: "file:/config/" }
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: OTEL_RESOURCE_ATTRIBUTES   # each pod its own instance (OBSERVABILITY.md §2.2)
+              value: "service.instance.id=$(POD_NAME),service.namespace=<pipeline>"
             - { name: SDH_LANDING_STANDBY, value: "true" }   # both replicas wait; the first to get the lease lands
           envFrom:
             - secretRef: { name: landing-claims-env }
@@ -392,6 +396,10 @@ spec:
           args: [control]
           env:
             - { name: SPRING_CONFIG_ADDITIONAL_LOCATION, value: "file:/config/,file:/control/" }
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: OTEL_RESOURCE_ATTRIBUTES   # each pod its own instance (OBSERVABILITY.md §2.2)
+              value: "service.instance.id=$(POD_NAME),service.namespace=<pipeline>"
           envFrom:
             - secretRef: { name: landing-claims-env }
           securityContext:

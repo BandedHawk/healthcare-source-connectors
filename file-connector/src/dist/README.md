@@ -223,6 +223,10 @@ spec:
           image: <registry>/split-stage:<version>
           env:
             - { name: SPRING_CONFIG_ADDITIONAL_LOCATION, value: "file:/config/" }
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: OTEL_RESOURCE_ATTRIBUTES   # each pod its own instance (OBSERVABILITY.md §2.2)
+              value: "service.instance.id=$(POD_NAME),service.namespace=<pipeline>"
           envFrom:
             - secretRef: { name: file-connector-env }
           securityContext:
@@ -322,6 +326,10 @@ spec:
           args: [control]
           env:
             - { name: SPRING_CONFIG_ADDITIONAL_LOCATION, value: "file:/config/,file:/control/" }
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: OTEL_RESOURCE_ATTRIBUTES   # each pod its own instance (OBSERVABILITY.md §2.2)
+              value: "service.instance.id=$(POD_NAME),service.namespace=<pipeline>"
           envFrom:
             - secretRef: { name: file-connector-env }
           securityContext:
