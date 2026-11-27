@@ -853,19 +853,20 @@ deploy_pipeline() {
   mkdir -p "$work/landing" "$work/splitter" "$work/convert" "$work/transform"
   readme_yaml "$ROOT/landing-connector/src/dist/README.md" \
     | sed -e "s#<registry>/landing-connector:<version>#$landing_connector#" -e 's/landing-claims/landing/g' \
+          -e "s/<pipeline>/$p/g" \
     > "$work/landing/landing.yaml"
   readme_yaml "$ROOT/file-connector/src/dist/README.md" \
-    | sed -e "s#<registry>/split-stage:<version>#$split_stage#" \
+    | sed -e "s#<registry>/split-stage:<version>#$split_stage#" -e "s/<pipeline>/$p/g" \
           -e 's/file-connector-\(env\|keys\|config\)/splitter-\1/g' \
           -e 's/name: file-connector }/name: splitter }/' -e 's/app: file-connector }/app: splitter }/g' \
     > "$work/splitter/splitter.yaml"
   readme_yaml "$ROOT/convert-stage/src/dist/README.md" \
-    | sed -e "s#<registry>/convert-stage:<version>#$convert_stage#" \
+    | sed -e "s#<registry>/convert-stage:<version>#$convert_stage#" -e "s/<pipeline>/$p/g" \
           -e 's/convert-stage-\(env\|keys\|config\)/convert-\1/g' \
           -e 's/name: convert-stage }/name: convert }/' -e 's/app: convert-stage }/app: convert }/g' \
     > "$work/convert/convert.yaml"
   readme_yaml "$TRANSFORMER/transform-stage/src/dist/README.md" \
-    | sed -e "s#<registry>/transform-stage:<version>#$transform_stage#" \
+    | sed -e "s#<registry>/transform-stage:<version>#$transform_stage#" -e "s/<pipeline>/$p/g" \
           -e "s/transform-stage-\(env\|keys\|config\|wstl\)/transform-$p-\1/g" \
           -e "s/<set id>/${wstl_sha:0:12}/g" -e "s/<set digest>/$wstl_sha/g" \
           -e "s/name: transform-stage }/name: transform-$p }/" -e "s/app: transform-stage }/app: transform-$p }/g" \
@@ -1045,7 +1046,7 @@ deploy_controls() {
   done
   # One replica each, not the README's two (docs/SANDBOX.md "Memory"); no ingress here: the harness reaches
   # them through port-forwards, which no network policy applies to.
-  local common=(-e 's/replicas: 2 /replicas: 1 /' -e 's/<ingress-namespace>/sdh-ingress/')
+  local common=(-e 's/replicas: 2 /replicas: 1 /' -e 's/<ingress-namespace>/sdh-ingress/' -e "s/<pipeline>/$p/g")
   {
     readme_control_yaml "$ROOT/landing-connector/src/dist/README.md" \
       | sed "${common[@]}" -e "s#<registry>/landing-connector:<version>#$landing_connector#" \

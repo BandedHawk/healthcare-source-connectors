@@ -274,8 +274,8 @@ local disk.
 ## 9. Findings
 
 - **`service.instance.id` was missing from the kits** until 2026-11-27; only the AWS PoC's patches set it, and a
-  stage with more than one pod reported wrong counts. The kits' Deployments now set it (§2.2). The sandbox's
-  manifests don't yet, and a deployment from older kit READMEs needs it added.
+  stage with more than one pod reported wrong counts. The kits' Deployments now set it (§2.2), and the sandbox,
+  built from them, fills in the pipeline. A deployment from older kit READMEs needs it added.
 - **The pipeline's name is filled in by hand.** A stage reports only its `service.name`, and the kits add
   `service.namespace=<pipeline>`. A `sdh.pipeline` resource attribute from the settings would make it automatic.
 - **No dashboards or alert rules are shipped.** §6.1's alerts are a starting point written here, not tested rules.
