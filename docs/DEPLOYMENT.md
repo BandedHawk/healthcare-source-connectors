@@ -193,8 +193,10 @@ what to measure):
 | `fhir` | a resource (by default a `Bundle`) from a single resource, an array or NDJSON; or groups of N resources, for bulk export | end to end, at load (bulk-export NDJSON especially); the transform stage's mapping is for C-CDA |
 | `parquet` | a row, as a JSON object; how an Iceberg table intake is split | end to end, at load; no mapping set |
 
-A plugin splitter (`format: <plugin>`) is the customer's to test. Each format runs as its own pipeline, so it
-neither slows nor is slowed by another in the code, but its numbers can't be read off C-CDA's.
+HL7 v2 isn't read at all: no splitter, converter, MLLP intake or mapping set
+([HL7V2-FUTURE-WORK.md](HL7V2-FUTURE-WORK.md)). A plugin splitter (`format: <plugin>`) is the customer's to test.
+Each format runs as its own pipeline, so it neither slows nor is slowed by another in the code, but its numbers
+can't be read off C-CDA's.
 
 ## Transports: what has been tested
 

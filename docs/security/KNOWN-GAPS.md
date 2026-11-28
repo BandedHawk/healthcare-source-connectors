@@ -92,7 +92,8 @@ product, so each needs a counterpart, or a change, for a managed service.
 ## 5. Product gaps
 
 Each needs only the product's owner to schedule it. Rows marked "a future project" are the payer claims
-work, beyond this project ([PAYER-X12-FUTURE-WORK.md](../PAYER-X12-FUTURE-WORK.md)).
+work and the HL7 v2 work, beyond this project ([PAYER-X12-FUTURE-WORK.md](../PAYER-X12-FUTURE-WORK.md),
+[HL7V2-FUTURE-WORK.md](../HL7V2-FUTURE-WORK.md)).
 
 | Gap | Change owed | Found in |
 |---|---|---|
@@ -134,6 +135,7 @@ work, beyond this project ([PAYER-X12-FUTURE-WORK.md](../PAYER-X12-FUTURE-WORK.m
 | The product can't tell a Part 2 record | none, unless P2 or P3 asks for one | D10 §4 |
 | No X12 transaction is mapped to FHIR (837, 835, 834, 278 to CARIN Blue Button, CARIN Digital Insurance Card, PDex), and NCPDP isn't read | a future project: mappings as WSTL sets, in the order Q5 decides, each validated against its IG | PAYER-X12-FUTURE-WORK.md §3.5 |
 | A claim and its payment (837 and 835) can't be joined: one type of content per pipeline | a future project: two pipelines joined after gold, revising the EOB as each part arrives, with a visible held state | PAYER-X12-FUTURE-WORK.md §4 |
+| HL7 v2 isn't read: no MLLP intake, no v2 splitter or converter, no mapping set, and no way to apply v2's updates, merges and cancellations | a future project: a v2 converter, an MLLP intake, WSTL sets per message family to US Core 6.1, and the event design | HL7V2-FUTURE-WORK.md |
 | Part 2 programs' claims can't be told apart | a future project: labels or routing from a customer's provider list, if Q4 says so | PAYER-X12-FUTURE-WORK.md §3.6 |
 | The patient lookup reads a span of at most 31 days, untimed at size, while access requests must be acted on in 15 calendar days from 2027-07-19 | time a multi-year lookup at size; a longer span or an index of patient identifiers if it doesn't fit | HIPAA.md §4.7; HIPAA-OPERATIONS.md §4.1 |
 | The product can't tell a C-CDA claims attachment from another C-CDA document, and has no intake for an X12 275 | depends on C5: an intake or a mark for attachments, if their pipeline must be kept apart | D10 §1.1, §4 |
